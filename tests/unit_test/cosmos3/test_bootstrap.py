@@ -7,8 +7,9 @@ from types import SimpleNamespace
 
 from sglang.srt.utils import hf_transformers_utils
 
-from sglang_omni.models.cosmos3 import bootstrap, request_builders
+from sglang_omni.models.cosmos3 import bootstrap
 from sglang_omni.models.cosmos3 import model_runner as cosmos_model_runner
+from sglang_omni.models.cosmos3 import request_builders
 from sglang_omni.models.cosmos3.bootstrap import resolve_transformer_weights_path
 from sglang_omni.scheduling import bootstrap as scheduling_bootstrap
 from sglang_omni.scheduling import omni_scheduler, sglang_backend

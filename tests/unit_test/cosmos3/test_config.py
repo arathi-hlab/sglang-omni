@@ -68,7 +68,6 @@ def test_model_revision_is_shared_by_every_stage() -> None:
 
         assert config.revision == "cosmos-revision"
         assert all(
-            config.stage_factory_kwargs(stage.name)["revision"]
-            == "cosmos-revision"
+            config.stage_factory_kwargs(stage.name)["revision"] == "cosmos-revision"
             for stage in config.stages
         )
