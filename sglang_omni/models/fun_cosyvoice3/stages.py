@@ -13,6 +13,12 @@ from sglang_omni.models.fun_cosyvoice3.request_builders import (
     cleanup_prepared_cosyvoice3_request,
     preprocess_cosyvoice3_payload,
 )
+from sglang_omni.models.fun_cosyvoice3.streaming import (
+    TOKEN_MEL_RATIO,
+    as_flow_embedding,
+    as_flow_prompt_feat,
+    as_flow_prompt_token,
+)
 from sglang_omni.platforms import current_platform
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.pipeline_state import build_usage
@@ -111,8 +117,8 @@ class _CosyVoice3Vocoder(BatchVocoderBase):
             raise RuntimeError(
                 "Fun-CosyVoice3 vocoder requires audio_codes from tts_engine"
             )
-        # The AR runner stores one-element tensors per step, which serialize as
-        # ``[num_tokens, 1]``. Flow consumes one unbatched token sequence here.
+        # note (guozhihao-224): AR stores one token per step, serialized as
+        # [T, 1]; Flow takes a single unbatched sequence.
         codes = torch.as_tensor(state.audio_codes, dtype=torch.long).reshape(-1)
         return state, codes
 
@@ -121,42 +127,56 @@ class _CosyVoice3Vocoder(BatchVocoderBase):
     ) -> list[tuple[Any, int]]:
         results = []
         for state, codes in items:
-            prompt_token = (
-                torch.as_tensor(state.flow_prompt_speech_token, dtype=torch.int32)
-                if state.flow_prompt_speech_token is not None
-                else torch.zeros(1, 0, dtype=torch.int32)
-            )
-            prompt_feat = (
-                torch.as_tensor(state.flow_prompt_speech_feat)
-                if state.flow_prompt_speech_feat is not None
-                else torch.zeros(1, 0, 80)
-            )
-            embedding = (
-                torch.as_tensor(state.flow_embedding)
-                if state.flow_embedding is not None
-                else torch.zeros(1, 192)
-            )
-            wav = self._token2wav(
+            wav = self.token2wav(
                 token=codes.unsqueeze(0),
-                prompt_token=prompt_token,
-                prompt_feat=prompt_feat,
-                embedding=embedding,
+                prompt_token=as_flow_prompt_token(state.flow_prompt_speech_token),
+                prompt_feat=as_flow_prompt_feat(state.flow_prompt_speech_feat),
+                embedding=as_flow_embedding(state.flow_embedding),
             )
             results.append((wav, state.sample_rate))
         return results
 
-    def _token2wav(
+    def token2wav(
         self,
         token: torch.Tensor,
         prompt_token: torch.Tensor,
         prompt_feat: torch.Tensor,
         embedding: torch.Tensor,
     ) -> torch.Tensor:
+        wav, _, _ = self.token2wav_chunk(
+            token=token,
+            prompt_token=prompt_token,
+            prompt_feat=prompt_feat,
+            embedding=embedding,
+            token_offset=0,
+            streaming=False,
+            finalize=True,
+            hift_mel=None,
+            speech_offset=0,
+        )
+        return wav
+
+    def token2wav_chunk(
+        self,
+        token: torch.Tensor,
+        prompt_token: torch.Tensor,
+        prompt_feat: torch.Tensor,
+        embedding: torch.Tensor,
+        *,
+        token_offset: int,
+        streaming: bool,
+        finalize: bool,
+        hift_mel: torch.Tensor | None,
+        speech_offset: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        # note (guozhihao-224): causal hops use streaming=True, finalize=False;
+        # leftover uses streaming=False, finalize=True, matching CosyVoice3Model.
         if token.shape[1] == 0:
             raise RuntimeError(
                 "Fun-CosyVoice3 generation produced no usable speech tokens"
             )
         device = next(self._flow.parameters()).device
+        offset = max(int(token_offset), 0)
 
         with torch.autocast(
             device_type=current_platform.device_type, enabled=self._fp16
@@ -173,11 +193,16 @@ class _CosyVoice3Vocoder(BatchVocoderBase):
                     [prompt_feat.shape[1]], dtype=torch.int32
                 ).to(device),
                 embedding=embedding.to(device),
-                streaming=False,
-                finalize=True,
+                streaming=streaming,
+                finalize=finalize,
             )
-        tts_speech, _ = self._hift.inference(speech_feat=tts_mel, finalize=True)
-        return tts_speech.detach().cpu()
+        tts_mel = tts_mel[:, :, offset * TOKEN_MEL_RATIO :]
+        if hift_mel is not None:
+            tts_mel = torch.cat([hift_mel.to(device=tts_mel.device), tts_mel], dim=2)
+        tts_speech, _ = self._hift.inference(speech_feat=tts_mel, finalize=finalize)
+        held = max(int(speech_offset), 0)
+        delta = tts_speech[:, held:].detach().cpu()
+        return delta, tts_mel.detach(), int(tts_speech.shape[1])
 
     def store_result(
         self,
@@ -211,7 +236,11 @@ def create_vocoder_executor(
     dtype: str = "bfloat16",
     max_batch_size: int = 8,
     max_batch_wait_ms: int = 2,
-) -> SimpleScheduler:
+) -> Any:
+    from sglang_omni.models.fun_cosyvoice3.streaming_vocoder import (
+        FunCosyVoice3StreamingVocoderScheduler,
+    )
+
     device = resolve_device_spec(device, gpu_id)
     checkpoint_dir = resolve_checkpoint(model_path)
     flow, hift = _load_cosyvoice3_flow_hift(
@@ -219,8 +248,9 @@ def create_vocoder_executor(
         device=device,
         fp16=(dtype == "float16"),
     )
-
-    return _CosyVoice3Vocoder(flow, hift, fp16=(dtype == "float16")).build_scheduler(
+    vocoder = _CosyVoice3Vocoder(flow, hift, fp16=(dtype == "float16"))
+    return FunCosyVoice3StreamingVocoderScheduler(
+        vocoder,
         max_batch_size=max_batch_size,
         max_batch_wait_ms=max_batch_wait_ms,
     )
