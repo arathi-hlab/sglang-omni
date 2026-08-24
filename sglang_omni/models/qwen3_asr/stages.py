@@ -36,6 +36,7 @@ def create_sglang_qwen3_asr_executor(
     pre_lm_max_batch_wait_ms: int = 0,
     enable_encoder_cuda_graph: bool = True,
     max_audio_clip_s: float | None = None,
+    pre_lm_cache_pin_host_memory: bool = True,
     server_args_overrides: dict[str, Any] | None = None,
 ):
     from sglang_omni.models.qwen3_asr.engine_builder import Qwen3ASREngineBuilder
@@ -69,6 +70,7 @@ def create_sglang_qwen3_asr_executor(
         pre_lm_max_batch_wait_ms=pre_lm_max_batch_wait_ms,
         enable_encoder_cuda_graph=enable_encoder_cuda_graph,
         max_audio_clip_s=max_audio_clip_s,
+        pre_lm_cache_pin_host_memory=pre_lm_cache_pin_host_memory,
     ).build(
         model_path,
         device=device,
