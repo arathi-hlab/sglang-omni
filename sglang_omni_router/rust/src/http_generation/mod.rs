@@ -18,12 +18,17 @@ use tracing::error;
 use crate::config::Config;
 use crate::error::{HttpFault, RouterError};
 use crate::request_id::{CanonicalRequestId, REQUEST_ID_HEADER};
-use crate::worker_pool::{AdmissionError, DispatchError, RequestLease, TrustDomain, WorkerPool};
+use crate::worker_pool::{
+    AdmissionError, CapacityClass, DispatchError, RequestLease, TrustDomain, WorkerPool,
+};
 
 use classify::classify;
 use headers::{canonical_content_type, sanitize_response, validate_request};
-use request_body::{BufferedBody, DirectRequestBody, SharedUploadState, UploadState};
-use response_body::DirectResponseBody;
+pub(crate) use headers::{
+    connection_tokens, is_request_media_type, parse_content_length, valid_generic_content_type,
+};
+pub(crate) use request_body::{BufferedBody, DirectRequestBody, SharedUploadState, UploadState};
+pub(crate) use response_body::DirectResponseBody;
 
 pub(crate) const CHAT_PATH: &str = "/v1/chat/completions";
 
@@ -43,13 +48,17 @@ impl HttpGeneration {
         config: &Config,
         pool: Arc<WorkerPool>,
         classification_slots: Arc<Semaphore>,
-    ) -> Result<Arc<Self>, RouterError> {
-        let http_generation = &config.http_generation;
+    ) -> Result<Option<Arc<Self>>, RouterError> {
+        let Some(http_generation) = config.http_generation.as_ref() else {
+            return Ok(None);
+        };
         let buffered_total = http_generation
             .buffered_total_usize()
             .map_err(RouterError::Config)?;
-        let client = pool.generation_client();
-        Ok(Arc::new(Self {
+        let client = pool
+            .generation_client()
+            .ok_or(RouterError::WorkerPoolInvariant)?;
+        Ok(Some(Arc::new(Self {
             client,
             pool,
             trust: TrustDomain::new(http_generation.trust_domain.clone()),
@@ -104,7 +113,10 @@ async fn handle(
     if framing.content_length > maximum {
         return Err(HttpFault::RequestBodyTooLarge);
     }
-    let admission = generation.pool.try_admit().map_err(map_admission)?;
+    let admission = generation
+        .pool
+        .try_admit(CapacityClass::GenerationHttp, 1)
+        .map_err(map_admission)?;
 
     if let Some(proof) = proof {
         let length = framing.content_length;
@@ -147,7 +159,7 @@ async fn handle(
     relay_buffered(generation, bytes, budget, lease, request_id, deadline).await
 }
 
-fn reserve_budget(
+pub(crate) fn reserve_budget(
     semaphore: &Arc<Semaphore>,
     bytes: u64,
 ) -> Result<OwnedSemaphorePermit, HttpFault> {
@@ -157,7 +169,7 @@ fn reserve_budget(
         .map_err(|_| HttpFault::RouterOverloaded)
 }
 
-async fn read_buffered(
+pub(crate) async fn read_buffered(
     mut body: Body,
     expected: Option<u64>,
     maximum: u64,
@@ -388,7 +400,7 @@ fn finish_buffered_classification<T>(
     classified
 }
 
-async fn classify_blocking<T>(
+pub(crate) async fn classify_blocking<T>(
     slots: Arc<Semaphore>,
     deadline: tokio::time::Instant,
     operation: impl FnOnce() -> Result<T, HttpFault> + Send + 'static,
@@ -456,6 +468,7 @@ const fn map_dispatch(error: DispatchError) -> HttpFault {
     match error {
         DispatchError::NoEligibleProfile => HttpFault::NoCompatibleWorker,
         DispatchError::Unavailable => HttpFault::RouterUnavailable,
+        DispatchError::Internal => HttpFault::InternalError,
     }
 }
 

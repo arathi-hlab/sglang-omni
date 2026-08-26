@@ -118,7 +118,7 @@ fn response_is_chunked(headers: &HeaderMap) -> Result<bool, HttpFault> {
     Ok(true)
 }
 
-fn connection_tokens(headers: &HeaderMap) -> Result<HashSet<String>, HttpFault> {
+pub(crate) fn connection_tokens(headers: &HeaderMap) -> Result<HashSet<String>, HttpFault> {
     let mut result = HashSet::new();
     for value in headers.get_all(CONNECTION) {
         let value = value
@@ -134,7 +134,7 @@ fn connection_tokens(headers: &HeaderMap) -> Result<HashSet<String>, HttpFault> 
     Ok(result)
 }
 
-fn parse_content_length(value: &HeaderValue) -> Option<u64> {
+pub(crate) fn parse_content_length(value: &HeaderValue) -> Option<u64> {
     let text = value.to_str().ok()?;
     if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
@@ -142,7 +142,7 @@ fn parse_content_length(value: &HeaderValue) -> Option<u64> {
     text.parse().ok()
 }
 
-fn is_request_media_type(value: &str, expected: &str) -> bool {
+pub(crate) fn is_request_media_type(value: &str, expected: &str) -> bool {
     let mut charset_seen = false;
     let mut valid_parameters = true;
     let media = parse_content_type(value, |name, parameter| {
@@ -158,7 +158,7 @@ fn is_request_media_type(value: &str, expected: &str) -> bool {
     media.is_some_and(|media| media.eq_ignore_ascii_case(expected) && valid_parameters)
 }
 
-fn valid_generic_content_type(value: &str) -> bool {
+pub(crate) fn valid_generic_content_type(value: &str) -> bool {
     parse_content_type(value, |_name, _parameter| {}).is_some()
 }
 

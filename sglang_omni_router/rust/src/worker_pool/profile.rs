@@ -16,6 +16,39 @@ const MAX_HEALTH_PATH_BYTES: usize = 128;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ServiceClass {
     GenerationHttp,
+    SpeechHttp,
+    SpeechBatch,
+    TranscriptionHttp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum CapacityClass {
+    GenerationHttp,
+    SpeechHttp,
+    SpeechBatch,
+    TranscriptionHttp,
+}
+
+impl CapacityClass {
+    pub(super) const fn index(self) -> usize {
+        match self {
+            Self::GenerationHttp => 0,
+            Self::SpeechHttp => 1,
+            Self::SpeechBatch => 2,
+            Self::TranscriptionHttp => 3,
+        }
+    }
+}
+
+impl ServiceClass {
+    pub(crate) const fn capacity(self) -> CapacityClass {
+        match self {
+            Self::GenerationHttp => CapacityClass::GenerationHttp,
+            Self::SpeechHttp => CapacityClass::SpeechHttp,
+            Self::SpeechBatch => CapacityClass::SpeechBatch,
+            Self::TranscriptionHttp => CapacityClass::TranscriptionHttp,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -59,7 +92,7 @@ pub(crate) struct WorkerConfig {
     pub(crate) worker_id: String,
     pub(crate) base_url: String,
     pub(crate) trust_domain: String,
-    pub(crate) default_model_id: String,
+    pub(crate) default_model_id: Option<String>,
     #[serde(default = "default_health_path")]
     pub(crate) health_path: String,
     pub(crate) service_profiles: Vec<ServiceProfile>,
@@ -113,6 +146,69 @@ pub(crate) enum StreamMode {
     Streaming,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SpeechResponseFormat {
+    Mp3,
+    Opus,
+    Aac,
+    Flac,
+    Wav,
+    Pcm,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SpeechTask {
+    TextToSpeech,
+    VoiceClone,
+    VoiceDesign,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReferenceForm {
+    None,
+    Direct,
+    List,
+    VqCodes,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BatchFeature {
+    Model,
+    Format,
+    Task,
+    Reference,
+    Voice,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SpeechToTextTask {
+    Transcribe,
+    Translate,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TranscriptionResponseFormat {
+    Json,
+    Text,
+    VerboseJson,
+    Srt,
+    Vtt,
+    Sse,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MediaProfile {
+    Audio,
+    AudioVideo,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(tag = "service", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum ServiceProfile {
@@ -123,6 +219,30 @@ pub(crate) enum ServiceProfile {
         input_modalities: Vec<InputModality>,
         output_modalities: Vec<OutputModality>,
         chat_audio_formats: Vec<ChatAudioFormat>,
+        stream_modes: Vec<StreamMode>,
+    },
+    SpeechHttp {
+        model_ids: Vec<String>,
+        response_formats: Vec<SpeechResponseFormat>,
+        stream_modes: Vec<StreamMode>,
+        tasks: Vec<SpeechTask>,
+        reference_forms: Vec<ReferenceForm>,
+        managed_voice: bool,
+    },
+    SpeechBatch {
+        model_ids: Vec<String>,
+        response_formats: Vec<SpeechResponseFormat>,
+        tasks: Vec<SpeechTask>,
+        reference_forms: Vec<ReferenceForm>,
+        managed_voice: bool,
+        max_batch_size: u16,
+        effective_features: Vec<BatchFeature>,
+    },
+    TranscriptionHttp {
+        model_ids: Vec<String>,
+        task: SpeechToTextTask,
+        response_formats: Vec<TranscriptionResponseFormat>,
+        media_profiles: Vec<MediaProfile>,
         stream_modes: Vec<StreamMode>,
     },
 }
@@ -145,6 +265,30 @@ pub(crate) enum ProfileRequirement {
         audio_format: Option<ChatAudioFormat>,
         stream_mode: StreamMode,
     },
+    SpeechHttp {
+        model: ModelSelection,
+        response_format: SpeechResponseFormat,
+        stream_mode: StreamMode,
+        task: SpeechTask,
+        reference_forms: Vec<ReferenceForm>,
+        managed_voice: bool,
+    },
+    SpeechBatch {
+        models: Vec<ModelSelection>,
+        response_formats: Vec<SpeechResponseFormat>,
+        tasks: Vec<SpeechTask>,
+        reference_forms: Vec<ReferenceForm>,
+        managed_voice: bool,
+        batch_size: u16,
+        effective_features: Vec<BatchFeature>,
+    },
+    TranscriptionHttp {
+        model: ModelSelection,
+        task: SpeechToTextTask,
+        response_format: TranscriptionResponseFormat,
+        media_profile: MediaProfile,
+        stream_mode: StreamMode,
+    },
 }
 
 /// Preserves whether the caller selected a model or relied on a worker default.
@@ -162,10 +306,12 @@ impl ModelSelection {
         }
     }
 
-    fn matches_worker_default(&self, worker_default: &str) -> bool {
+    fn matches_worker_default(&self, worker_default: Option<&str>) -> bool {
         match self {
             Self::Explicit(_) => true,
-            Self::WorkerDefault { expected_model_id } => expected_model_id == worker_default,
+            Self::WorkerDefault { expected_model_id } => {
+                worker_default == Some(expected_model_id.as_str())
+            }
         }
     }
 }
@@ -180,6 +326,26 @@ impl RouteRequirement {
 
     pub(super) fn trust_domain(&self) -> &TrustDomain {
         &self.trust_domain
+    }
+
+    #[cfg(test)]
+    pub(crate) fn profile(&self) -> &ProfileRequirement {
+        &self.profile
+    }
+
+    pub(super) fn capacity_class(&self) -> CapacityClass {
+        self.profile.service_class().capacity()
+    }
+}
+
+impl ProfileRequirement {
+    pub(super) const fn service_class(&self) -> ServiceClass {
+        match self {
+            Self::GenerationHttp { .. } => ServiceClass::GenerationHttp,
+            Self::SpeechHttp { .. } => ServiceClass::SpeechHttp,
+            Self::SpeechBatch { .. } => ServiceClass::SpeechBatch,
+            Self::TranscriptionHttp { .. } => ServiceClass::TranscriptionHttp,
+        }
     }
 }
 
@@ -232,6 +398,101 @@ impl ServiceProfile {
                 }
                 Ok(())
             }
+            Self::SpeechHttp {
+                model_ids,
+                response_formats,
+                stream_modes,
+                tasks,
+                reference_forms,
+                ..
+            } => {
+                validate_models(model_ids)?;
+                validate_set(
+                    response_formats,
+                    "workers.service_profiles.response_formats",
+                    false,
+                )?;
+                validate_set(stream_modes, "workers.service_profiles.stream_modes", false)?;
+                validate_set(tasks, "workers.service_profiles.tasks", false)?;
+                validate_set(
+                    reference_forms,
+                    "workers.service_profiles.reference_forms",
+                    false,
+                )?;
+                if stream_modes.contains(&StreamMode::Streaming)
+                    && (response_formats.len() != 1
+                        || response_formats[0] != SpeechResponseFormat::Pcm)
+                {
+                    return Err(ConfigError::invalid(
+                        "workers.service_profiles.response_formats",
+                        "a streaming speech row may contain only pcm",
+                    ));
+                }
+                Ok(())
+            }
+            Self::SpeechBatch {
+                model_ids,
+                response_formats,
+                tasks,
+                reference_forms,
+                max_batch_size,
+                effective_features,
+                ..
+            } => {
+                validate_models(model_ids)?;
+                validate_set(
+                    response_formats,
+                    "workers.service_profiles.response_formats",
+                    false,
+                )?;
+                validate_set(tasks, "workers.service_profiles.tasks", false)?;
+                validate_set(
+                    reference_forms,
+                    "workers.service_profiles.reference_forms",
+                    false,
+                )?;
+                validate_set(
+                    effective_features,
+                    "workers.service_profiles.effective_features",
+                    true,
+                )?;
+                if *max_batch_size == 0 {
+                    return Err(ConfigError::invalid(
+                        "workers.service_profiles.max_batch_size",
+                        "must be positive",
+                    ));
+                }
+                Ok(())
+            }
+            Self::TranscriptionHttp {
+                model_ids,
+                response_formats,
+                media_profiles,
+                stream_modes,
+                ..
+            } => {
+                validate_models(model_ids)?;
+                validate_set(
+                    response_formats,
+                    "workers.service_profiles.response_formats",
+                    false,
+                )?;
+                validate_set(
+                    media_profiles,
+                    "workers.service_profiles.media_profiles",
+                    false,
+                )?;
+                validate_set(stream_modes, "workers.service_profiles.stream_modes", false)?;
+                if response_formats.contains(&TranscriptionResponseFormat::Sse)
+                    != stream_modes.contains(&StreamMode::Streaming)
+                {
+                    return Err(ConfigError::invalid(
+                        "workers.service_profiles.response_formats",
+                        "sse support must match streaming support",
+                    ));
+                }
+                Ok(())
+            }
         }
     }
 
@@ -265,10 +526,84 @@ impl ServiceProfile {
                     && set_eq(a_audio, b_audio)
                     && set_eq(a_streams, b_streams)
             }
+            (
+                Self::SpeechHttp {
+                    model_ids: am,
+                    response_formats: af,
+                    stream_modes: asm,
+                    tasks: at,
+                    reference_forms: ar,
+                    managed_voice: av,
+                },
+                Self::SpeechHttp {
+                    model_ids: bm,
+                    response_formats: bf,
+                    stream_modes: bsm,
+                    tasks: bt,
+                    reference_forms: br,
+                    managed_voice: bv,
+                },
+            ) => {
+                av == bv
+                    && set_eq(am, bm)
+                    && set_eq(af, bf)
+                    && set_eq(asm, bsm)
+                    && set_eq(at, bt)
+                    && set_eq(ar, br)
+            }
+            (
+                Self::SpeechBatch {
+                    model_ids: am,
+                    response_formats: af,
+                    tasks: at,
+                    reference_forms: ar,
+                    managed_voice: av,
+                    max_batch_size: ab,
+                    effective_features: ae,
+                },
+                Self::SpeechBatch {
+                    model_ids: bm,
+                    response_formats: bf,
+                    tasks: bt,
+                    reference_forms: br,
+                    managed_voice: bv,
+                    max_batch_size: bb,
+                    effective_features: be,
+                },
+            ) => {
+                av == bv
+                    && ab == bb
+                    && set_eq(am, bm)
+                    && set_eq(af, bf)
+                    && set_eq(at, bt)
+                    && set_eq(ar, br)
+                    && set_eq(ae, be)
+            }
+            (
+                Self::TranscriptionHttp {
+                    model_ids: am,
+                    task: at,
+                    response_formats: af,
+                    media_profiles: ap,
+                    stream_modes: asm,
+                },
+                Self::TranscriptionHttp {
+                    model_ids: bm,
+                    task: bt,
+                    response_formats: bf,
+                    media_profiles: bp,
+                    stream_modes: bsm,
+                },
+            ) => at == bt && set_eq(am, bm) && set_eq(af, bf) && set_eq(ap, bp) && set_eq(asm, bsm),
+            _ => false,
         }
     }
 
-    pub(super) fn matches(&self, requirement: &ProfileRequirement, worker_default: &str) -> bool {
+    pub(super) fn matches(
+        &self,
+        requirement: &ProfileRequirement,
+        worker_default: Option<&str>,
+    ) -> bool {
         match (self, requirement) {
             (
                 Self::GenerationHttp {
@@ -301,12 +636,112 @@ impl ServiceProfile {
                     && audio_format.is_none_or(|format| chat_audio_formats.contains(&format))
                     && stream_modes.contains(stream_mode)
             }
+            (
+                Self::SpeechHttp {
+                    model_ids,
+                    response_formats,
+                    stream_modes,
+                    tasks,
+                    reference_forms,
+                    managed_voice,
+                },
+                ProfileRequirement::SpeechHttp {
+                    model,
+                    response_format,
+                    stream_mode,
+                    task,
+                    reference_forms: required_references,
+                    managed_voice: required_voice,
+                },
+            ) => {
+                model.matches_worker_default(worker_default)
+                    && model_ids
+                        .iter()
+                        .any(|candidate| candidate == model.model_id())
+                    && response_formats.contains(response_format)
+                    && stream_modes.contains(stream_mode)
+                    && tasks.contains(task)
+                    && contains_all(reference_forms, required_references)
+                    && managed_voice == required_voice
+            }
+            (
+                Self::SpeechBatch {
+                    model_ids,
+                    response_formats,
+                    tasks,
+                    reference_forms,
+                    managed_voice,
+                    max_batch_size,
+                    effective_features,
+                },
+                ProfileRequirement::SpeechBatch {
+                    models,
+                    response_formats: required_formats,
+                    tasks: required_tasks,
+                    reference_forms: required_references,
+                    managed_voice: required_voice,
+                    batch_size,
+                    effective_features: required_features,
+                },
+            ) => {
+                models.iter().all(|model| {
+                    model.matches_worker_default(worker_default)
+                        && model_ids
+                            .iter()
+                            .any(|candidate| candidate == model.model_id())
+                }) && *batch_size <= *max_batch_size
+                    && contains_all(response_formats, required_formats)
+                    && contains_all(tasks, required_tasks)
+                    && contains_all(reference_forms, required_references)
+                    && contains_all(effective_features, required_features)
+                    && managed_voice == required_voice
+            }
+            (
+                Self::TranscriptionHttp {
+                    model_ids,
+                    task,
+                    response_formats,
+                    media_profiles,
+                    stream_modes,
+                },
+                ProfileRequirement::TranscriptionHttp {
+                    model,
+                    task: required_task,
+                    response_format,
+                    media_profile,
+                    stream_mode,
+                },
+            ) => {
+                model.matches_worker_default(worker_default)
+                    && model_ids
+                        .iter()
+                        .any(|candidate| candidate == model.model_id())
+                    && task == required_task
+                    && response_formats.contains(response_format)
+                    && media_profiles.contains(media_profile)
+                    && stream_modes.contains(stream_mode)
+            }
+            _ => false,
         }
     }
 
     fn contains_model(&self, model: &str) -> bool {
         match self {
-            Self::GenerationHttp { model_ids, .. } => model_ids.iter().any(|item| item == model),
+            Self::GenerationHttp { model_ids, .. }
+            | Self::SpeechHttp { model_ids, .. }
+            | Self::SpeechBatch { model_ids, .. }
+            | Self::TranscriptionHttp { model_ids, .. } => {
+                model_ids.iter().any(|item| item == model)
+            }
+        }
+    }
+
+    pub(crate) const fn service_class(&self) -> ServiceClass {
+        match self {
+            Self::GenerationHttp { .. } => ServiceClass::GenerationHttp,
+            Self::SpeechHttp { .. } => ServiceClass::SpeechHttp,
+            Self::SpeechBatch { .. } => ServiceClass::SpeechBatch,
+            Self::TranscriptionHttp { .. } => ServiceClass::TranscriptionHttp,
         }
     }
 }
@@ -326,7 +761,11 @@ pub(crate) fn validate_workers(workers: &[WorkerConfig]) -> Result<(), ConfigErr
             return Err(ConfigError::invalid("workers.worker_id", "must be unique"));
         }
         validate_identifier(&worker.trust_domain, "workers.trust_domain")?;
-        if !valid_model_id(&worker.default_model_id) {
+        if worker
+            .default_model_id
+            .as_deref()
+            .is_some_and(|model| !valid_model_id(model))
+        {
             return Err(ConfigError::invalid(
                 "workers.default_model_id",
                 "must be 1 to 256 bytes",
@@ -383,37 +822,37 @@ pub(crate) fn validate_workers(workers: &[WorkerConfig]) -> Result<(), ConfigErr
                 ));
             }
         }
-        if !worker
-            .service_profiles
-            .iter()
-            .any(|profile| profile.contains_model(&worker.default_model_id))
-        {
-            return Err(ConfigError::invalid(
-                "workers.default_model_id",
-                "must belong to a generation profile row",
-            ));
+        if let Some(default) = worker.default_model_id.as_deref() {
+            for advertised in &worker.service_profiles {
+                let service = advertised.service_class();
+                if !worker.service_profiles.iter().any(|profile| {
+                    profile.service_class() == service
+                        && match (advertised, profile) {
+                            (
+                                ServiceProfile::TranscriptionHttp {
+                                    task: advertised_task,
+                                    ..
+                                },
+                                ServiceProfile::TranscriptionHttp {
+                                    task: candidate_task,
+                                    ..
+                                },
+                            ) => advertised_task == candidate_task,
+                            (ServiceProfile::TranscriptionHttp { .. }, _)
+                            | (_, ServiceProfile::TranscriptionHttp { .. }) => false,
+                            _ => true,
+                        }
+                        && profile.contains_model(default)
+                }) {
+                    return Err(ConfigError::invalid(
+                        "workers.default_model_id",
+                        "must belong to every advertised model-executing service and task",
+                    ));
+                }
+            }
         }
     }
     Ok(())
-}
-
-pub(crate) fn generation_cohort_is_homogeneous<'a>(
-    mut members: impl Iterator<Item = (&'a str, &'a [ServiceProfile])>,
-) -> bool {
-    let Some((default_model_id, profiles)) = members.next() else {
-        return false;
-    };
-    members.all(|(candidate_model_id, candidate_profiles)| {
-        candidate_model_id == default_model_id
-            && generation_rows_equal(candidate_profiles, profiles)
-    })
-}
-
-fn generation_rows_equal(left: &[ServiceProfile], right: &[ServiceProfile]) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .all(|profile| right.iter().any(|other| profile.semantically_eq(other)))
 }
 
 fn validate_models(values: &[String]) -> Result<(), ConfigError> {
@@ -504,7 +943,7 @@ mod tests {
             worker_id: String::from("worker-a"),
             base_url: String::from("http://127.0.0.1:8000/"),
             trust_domain: String::from("local"),
-            default_model_id: String::from("omni"),
+            default_model_id: Some(String::from("omni")),
             health_path: String::from("/health"),
             service_profiles: vec![profile("omni")],
         }
@@ -526,7 +965,7 @@ mod tests {
     #[test]
     fn strict_profile_and_default_correlation_fail_closed() {
         let mut missing_default = worker();
-        missing_default.default_model_id = String::from("other");
+        missing_default.default_model_id = Some(String::from("other"));
         assert!(validate_workers(&[missing_default]).is_err());
 
         let mut duplicate = worker();
@@ -544,6 +983,61 @@ mod tests {
             stream_modes: vec![StreamMode::Streaming],
         }];
         assert!(validate_workers(&[invalid_audio]).is_err());
+    }
+
+    #[test]
+    fn streaming_speech_rows_are_pcm_only() {
+        let speech = |response_formats| ServiceProfile::SpeechHttp {
+            model_ids: vec![String::from("tts")],
+            response_formats,
+            stream_modes: vec![StreamMode::NonStreaming, StreamMode::Streaming],
+            tasks: vec![SpeechTask::TextToSpeech],
+            reference_forms: vec![ReferenceForm::None],
+            managed_voice: false,
+        };
+        assert!(speech(vec![SpeechResponseFormat::Pcm]).validate().is_ok());
+        assert!(
+            speech(vec![SpeechResponseFormat::Pcm, SpeechResponseFormat::Wav])
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn worker_default_is_valid_for_every_advertised_service() {
+        let speech = |models| ServiceProfile::SpeechHttp {
+            model_ids: models,
+            response_formats: vec![SpeechResponseFormat::Wav],
+            stream_modes: vec![StreamMode::NonStreaming],
+            tasks: vec![SpeechTask::TextToSpeech],
+            reference_forms: vec![ReferenceForm::None],
+            managed_voice: false,
+        };
+        let mut missing_service_default = worker();
+        missing_service_default
+            .service_profiles
+            .push(speech(vec![String::from("other")]));
+        assert!(validate_workers(&[missing_service_default]).is_err());
+
+        let mut correlated_default = worker();
+        correlated_default
+            .service_profiles
+            .push(speech(vec![String::from("omni"), String::from("other")]));
+        assert!(validate_workers(&[correlated_default]).is_ok());
+
+        let transcription = |task, models| ServiceProfile::TranscriptionHttp {
+            model_ids: models,
+            task,
+            response_formats: vec![TranscriptionResponseFormat::Json],
+            media_profiles: vec![MediaProfile::Audio],
+            stream_modes: vec![StreamMode::NonStreaming],
+        };
+        let mut mismatched_task_default = worker();
+        mismatched_task_default.service_profiles.extend([
+            transcription(SpeechToTextTask::Transcribe, vec![String::from("omni")]),
+            transcription(SpeechToTextTask::Translate, vec![String::from("other")]),
+        ]);
+        assert!(validate_workers(&[mismatched_task_default]).is_err());
     }
 
     #[test]
@@ -567,7 +1061,39 @@ mod tests {
             audio_format: Some(ChatAudioFormat::Wav),
             stream_mode: StreamMode::Streaming,
         };
-        assert!(!text.matches(&cross_row, "omni"));
-        assert!(!audio.matches(&cross_row, "audio"));
+        assert!(!text.matches(&cross_row, Some("omni")));
+        assert!(!audio.matches(&cross_row, Some("audio")));
+    }
+
+    #[test]
+    fn speech_to_text_task_is_singular_and_media_only_workers_need_no_generation_shape() {
+        let profile = |task| ServiceProfile::TranscriptionHttp {
+            model_ids: vec![String::from("asr")],
+            task,
+            response_formats: vec![TranscriptionResponseFormat::Json],
+            media_profiles: vec![MediaProfile::Audio],
+            stream_modes: vec![StreamMode::NonStreaming],
+        };
+        let requirement = ProfileRequirement::TranscriptionHttp {
+            model: ModelSelection::WorkerDefault {
+                expected_model_id: String::from("asr"),
+            },
+            task: SpeechToTextTask::Translate,
+            response_format: TranscriptionResponseFormat::Json,
+            media_profile: MediaProfile::Audio,
+            stream_mode: StreamMode::NonStreaming,
+        };
+        assert!(!profile(SpeechToTextTask::Transcribe).matches(&requirement, Some("asr")));
+        assert!(profile(SpeechToTextTask::Translate).matches(&requirement, Some("asr")));
+
+        let worker = WorkerConfig {
+            worker_id: String::from("media-only"),
+            base_url: String::from("http://127.0.0.1:8001/"),
+            trust_domain: String::from("local"),
+            default_model_id: None,
+            health_path: String::from("/health"),
+            service_profiles: vec![profile(SpeechToTextTask::Transcribe)],
+        };
+        assert!(validate_workers(&[worker]).is_ok());
     }
 }

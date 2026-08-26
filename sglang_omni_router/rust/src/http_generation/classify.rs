@@ -54,7 +54,7 @@ pub(crate) fn classify(
     let messages = facts.messages.unwrap_or_default();
     let model = match facts.model.flatten() {
         Some(model) => ModelSelection::Explicit(model),
-        None => match pool.resolve_default_model_id(trust, ServiceClass::GenerationHttp) {
+        None => match pool.resolve_default_model_id(trust, ServiceClass::GenerationHttp, None) {
             DefaultModelResolution::Unique(model) => ModelSelection::WorkerDefault {
                 expected_model_id: model.to_owned(),
             },
