@@ -1112,7 +1112,7 @@ def test_qwen3_tts_text_only_defaults_to_custom_voice() -> None:
     assert state.voice == "Vivian"
     assert state.ref_audio is None
     assert state.ref_text is None
-    assert state.non_streaming_mode is True
+    assert state.non_streaming_mode is False
 
 
 def test_qwen3_tts_custom_voice_rejects_base_only_fields() -> None:
@@ -1175,6 +1175,30 @@ def test_qwen3_tts_voice_design_requires_instructions() -> None:
         build_qwen3_tts_state(payload)
 
 
+def test_qwen3_tts_custom_voice_keeps_packed_prompt_behind_compatibility_flag() -> None:
+    payload = make_payload(
+        inputs="target",
+        tts_params={"task_type": "CustomVoice", "non_streaming_mode": True},
+    )
+
+    state = build_qwen3_tts_state(payload)
+
+    assert state.task_type == "CustomVoice"
+    assert state.non_streaming_mode is True
+
+
+def test_qwen3_tts_custom_voice_honors_params_non_streaming_mode() -> None:
+    payload = make_payload(
+        inputs="target",
+        params={"non_streaming_mode": True},
+        tts_params={"task_type": "CustomVoice"},
+    )
+
+    state = build_qwen3_tts_state(payload)
+
+    assert state.non_streaming_mode is True
+
+
 def test_qwen3_tts_voice_design_state_forces_non_streaming() -> None:
     payload = make_payload(
         inputs="target",
@@ -1189,6 +1213,21 @@ def test_qwen3_tts_voice_design_state_forces_non_streaming() -> None:
     assert state.task_type == "VoiceDesign"
     assert state.instructions == "A warm adult voice."
     assert state.voice is None
+    assert state.non_streaming_mode is True
+
+
+def test_qwen3_tts_voice_design_ignores_streaming_compatibility_flag() -> None:
+    payload = make_payload(
+        inputs="target",
+        tts_params={
+            "task_type": "VoiceDesign",
+            "instructions": "A warm adult voice.",
+            "non_streaming_mode": False,
+        },
+    )
+
+    state = build_qwen3_tts_state(payload)
+
     assert state.non_streaming_mode is True
 
 
@@ -2567,6 +2606,65 @@ def test_qwen3_tts_stream_output_prepends_reference_once() -> None:
     assert "ref_code_len" not in second[0].metadata
 
 
+def test_qwen3_tts_custom_voice_stream_output_uses_zero_ref_vocoder_path() -> None:
+    from sglang_omni.models.qwen3_tts.request_builders import (
+        make_qwen3_tts_scheduler_adapters,
+    )
+
+    payload = make_payload(
+        inputs="target",
+        params={"stream": True},
+        tts_params={"task_type": "CustomVoice"},
+    )
+    _, _, stream_output_builder = make_qwen3_tts_scheduler_adapters(
+        model=None,
+        wrapper=None,
+    )
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        _FakeQwen3TTSTokenizer(),
+        device="cpu",
+    )
+    initial_frames = scheduler._default_initial_chunk_frames
+    generated = torch.arange(initial_frames * 2, dtype=torch.long).view(
+        initial_frames, 2
+    )
+    data = Qwen3TTSSGLangRequestData(
+        ref_code=None,
+        latest_stream_code_chunk=generated,
+        stream_codec_output=True,
+        stage_payload=payload,
+    )
+
+    first = stream_output_builder(payload.request_id, data, None)
+    assert len(first) == 1
+    assert first[0].data.tolist() == generated.tolist()
+    assert first[0].metadata["ref_code_len"] == 0
+    assert first[0].target == "vocoder"
+
+    data.latest_stream_code_chunk = torch.tensor([[100, 101]], dtype=torch.long)
+    second = stream_output_builder(payload.request_id, data, None)
+    assert second[0].data.tolist() == [[100, 101]]
+    assert "ref_code_len" not in second[0].metadata
+
+    scheduler._on_streaming_new_request(payload.request_id, payload)
+    scheduler._on_chunk(
+        payload.request_id,
+        StreamItem(
+            chunk_id=0,
+            data=first[0].data,
+            from_stage="tts_engine",
+            metadata=first[0].metadata,
+        ),
+    )
+    state = scheduler._stream_states[payload.request_id]
+    assert state.ref_frames == 0
+    assert state.pending_ref_frames == 0
+    assert scheduler.outbox.qsize() == 1
+    first_audio = scheduler.outbox.get_nowait()
+    assert first_audio.type == "stream"
+    assert len(first_audio.data["audio_waveform"]) == initial_frames * 4 * 4
+
+
 def test_qwen3_tts_stream_output_skips_non_streaming_generation_modes() -> None:
     from sglang_omni.models.qwen3_tts.request_builders import (
         make_qwen3_tts_scheduler_adapters,
@@ -3244,6 +3342,39 @@ def test_qwen3_tts_request_data_keeps_decode_tensors_on_prepared_device(
     assert 0 <= data.subtalker_sampling_seed <= 0x7FFFFFFF
 
 
+def test_qwen3_tts_packed_prompt_disables_incremental_codec_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_sglang(monkeypatch)
+    payload = make_payload(inputs="target")
+    payload.data = {
+        qwen3_request_builders._QWEN3_TTS_PREPARED_MARKER: payload.request_id
+    }
+    prepared = Qwen3TTSPreparedRequest(
+        state=Qwen3TTSState(task_type="CustomVoice", non_streaming_mode=True),
+        input_ids_list=[11, 12, 13],
+        input_ids=torch.tensor([11, 12, 13], dtype=torch.long),
+        attention_mask=torch.ones((1, 3), dtype=torch.long),
+        trailing_text_hidden=torch.randn(1, 4),
+        ref_code=None,
+        prompt_input_embeds=torch.randn(3, 4),
+        tts_pad_embed=torch.randn(4),
+        gen_kwargs={"max_new_tokens": 16},
+    )
+    with qwen3_request_builders._PREPARED_REQUESTS_LOCK:
+        qwen3_request_builders._PREPARED_REQUESTS[payload.request_id] = prepared
+
+    data = build_sglang_qwen3_tts_request(
+        payload,
+        model=SimpleNamespace(
+            config=SimpleNamespace(codec_eos_token_id=42, vocab_size=1200)
+        ),
+        wrapper=object(),
+    )
+
+    assert data.stream_codec_output is False
+
+
 def test_qwen3_tts_request_data_uses_private_sampling_seeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3446,10 +3577,66 @@ def test_qwen3_tts_prepare_custom_voice_uses_speaker_path(
 
     assert prepared.state.task_type == "CustomVoice"
     assert prepared.state.voice == "Ryan"
+    assert prepared.state.non_streaming_mode is False
     assert [name for name, _ in calls] == ["custom"]
     kwargs = calls[0][1]
     assert kwargs["voice"] == "Ryan"
+    assert kwargs["non_streaming_mode"] is False
     assert kwargs["instruct_id"] is not None
+
+
+def test_qwen3_tts_prepare_custom_voice_packed_prompt_compatibility_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict] = []
+
+    class FakeWrapper:
+        def _build_assistant_text(self, text):
+            return f"assistant:{text}"
+
+        def _build_instruct_text(self, text):
+            return f"instruct:{text}"
+
+        def _tokenize_texts(self, texts):
+            return [torch.arange(8, dtype=torch.long).unsqueeze(0) for _ in texts]
+
+        def _merge_generate_kwargs(self, **kwargs):
+            return kwargs
+
+    class FakeModel:
+        tts_model_type = "custom_voice"
+        model = SimpleNamespace(_feedback_buffer=torch.zeros(4, 4))
+
+        def build_custom_voice_inputs(self, **kwargs):
+            calls.append(kwargs)
+            return (
+                torch.ones(1, 3, 4),
+                torch.ones(1, 3, dtype=torch.long),
+                torch.ones(1, 1, 4),
+                None,
+            )
+
+    monkeypatch.setattr(
+        qwen3_request_builders,
+        "_build_qwen3_tts_pad_embed",
+        lambda model: torch.zeros(4),
+    )
+
+    prepared = qwen3_request_builders._prepare_qwen3_tts_request(
+        make_payload(
+            inputs="target",
+            tts_params={
+                "task_type": "CustomVoice",
+                "voice": "Ryan",
+                "non_streaming_mode": True,
+            },
+        ),
+        model=FakeModel(),
+        wrapper=FakeWrapper(),
+    )
+
+    assert prepared.state.non_streaming_mode is True
+    assert calls[0]["non_streaming_mode"] is True
 
 
 def test_qwen3_tts_prepare_voice_design_uses_instruction_path(

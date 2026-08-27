@@ -646,6 +646,9 @@ that happened to contain an older version of the test.
     retention when a launch or event wait fails (with a real CUDA reuse case)
   - model-owned default preservation for language and sampling parameters
   - Base, CustomVoice, and VoiceDesign request validation
+  - CustomVoice incremental streaming via the Base `stream_to=vocoder` path:
+    zero-ref first vocoder chunk, and `non_streaming_mode` restoring the packed
+    text prompt
   - voice-clone reference validation
   - pipeline payload state serialization
   - code-predictor CUDA-graph bit-identity, capture-failure fallback, top-k

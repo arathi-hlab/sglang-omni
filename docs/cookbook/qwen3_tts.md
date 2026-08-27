@@ -247,17 +247,35 @@ curl -N -X POST http://localhost:8000/v1/audio/speech \
   --output output.pcm
 ```
 
+CustomVoice uses the same incremental vocoder path. Omit `references` and pick a
+checkpoint speaker:
+
+```bash
+curl -N -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+    "voice": "Vivian",
+    "input": "Get the trust fund to the bank early.",
+    "stream": true,
+    "response_format": "pcm"
+  }' \
+  --output output.pcm
+```
+
 Streaming returns `audio/pcm` 16-bit mono PCM bytes with sample-rate metadata in
 the response headers. See the [Higgs TTS cookbook](../cookbook/higgs_tts.md#streaming)
 for a full Python raw PCM consumer.
 
-Base/reference-cloning checkpoints use true incremental codec and vocoder
-streaming for both this HTTP endpoint and `/v1/audio/speech/stream` WebSocket
-sessions with `stream_audio=true`. CustomVoice and VoiceDesign remain
-non-streaming.
+Base/reference-cloning and CustomVoice checkpoints use true incremental codec
+and vocoder streaming for both this HTTP endpoint and `/v1/audio/speech/stream`
+WebSocket sessions with `stream_audio=true`. VoiceDesign remains non-streaming.
+Set `"non_streaming_mode": true` on a CustomVoice request to restore the packed
+text prompt and whole-utterance vocoder path.
 
-When `initial_codec_chunk_frames` is omitted, Qwen3-TTS Base defaults to `8`
-codec frames for the first vocoder chunk so concurrent streams stay continuous.
+When `initial_codec_chunk_frames` is omitted, Qwen3-TTS Base and CustomVoice
+default to `8` codec frames for the first vocoder chunk so concurrent streams
+stay continuous.
 Pass a smaller value only when trading continuity for lower time-to-first-audio.
 Utterances that finish in fewer than `8` generated codec frames never reach the
 first chunk, so their audio arrives complete in a single final flush.
@@ -279,7 +297,8 @@ first chunk, so their audio arrives complete in a single final flush.
 | `max_new_tokens` | `2048` | Maximum number of generated codec tokens |
 | `seed` | `null` | Random seed for reproducibility |
 | `stream` | `false` | Stream raw PCM audio chunks |
-| `initial_codec_chunk_frames` | `8` (model default when omitted) | First Base streaming vocoder chunk size in codec frames. Smaller values lower TTFA but underrun more easily; `0` uses the steady stride from the start |
+| `non_streaming_mode` | `null` | CustomVoice compatibility flag. Omitted CustomVoice requests use the incremental Base path. `true` keeps the packed-text prompt and disables incremental codec emission |
+| `initial_codec_chunk_frames` | `8` (model default when omitted) | First Base/CustomVoice streaming vocoder chunk size in codec frames. Smaller values lower TTFA but underrun more easily; `0` uses the steady stride from the start |
 
 ## Model Variants
 

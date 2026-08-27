@@ -269,7 +269,6 @@ def build_qwen3_tts_state(payload: StagePayload) -> Qwen3TTSState:
         if has_param(tts_params, params, "x_vector_only_mode"):
             raise ValueError("Qwen3-TTS CustomVoice does not accept x_vector_only_mode")
         voice = voice or QWEN3_TTS_DEFAULT_CUSTOM_VOICE
-        non_streaming_mode = True
     elif task_type == QWEN3_TTS_TASK_VOICE_DESIGN:
         if has_param(tts_params, params, "ref_audio") or references_contain_audio(
             references
@@ -284,7 +283,6 @@ def build_qwen3_tts_state(payload: StagePayload) -> Qwen3TTSState:
         if not instructions:
             raise ValueError("Qwen3-TTS VoiceDesign requires instructions")
         voice = None
-        non_streaming_mode = True
     else:
         raise AssertionError(f"unhandled Qwen3-TTS task type: {task_type}")
 
@@ -421,10 +419,18 @@ def resolve_non_streaming_mode(
     params: dict[str, Any],
     tts_params: dict[str, Any],
 ) -> bool:
+    """Return whether this request uses the packed-text, non-incremental path.
+
+    VoiceDesign stays packed regardless of the request flag. An explicit
+    ``non_streaming_mode`` wins for Base and CustomVoice. CustomVoice otherwise
+    uses the same streaming prompt and ``stream_codec_output`` path as Base.
+    """
+    if task_type == QWEN3_TTS_TASK_VOICE_DESIGN:
+        return True
     for source in (params, tts_params):
         if "non_streaming_mode" in source:
             return bool(source["non_streaming_mode"])
-    return task_type in (QWEN3_TTS_TASK_CUSTOM_VOICE, QWEN3_TTS_TASK_VOICE_DESIGN)
+    return False
 
 
 def normalize_language(language: Any) -> str:

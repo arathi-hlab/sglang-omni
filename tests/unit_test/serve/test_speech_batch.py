@@ -274,6 +274,7 @@ def test_batch_speech_item_null_voice_inherits_default_voice() -> None:
         ("token_count", "5"),
         ("duration_tokens", "5"),
         ("x_vector_only_mode", "true"),
+        ("non_streaming_mode", "true"),
     ],
 )
 def test_batch_speech_rejects_stringified_default_types(

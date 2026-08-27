@@ -1427,6 +1427,25 @@ def test_speech_request_passes_streaming_control_fields() -> None:
     assert gen_req.extra_params == {"initial_codec_chunk_frames": 8}
 
 
+def test_speech_request_passes_non_streaming_mode_compatibility_flag() -> None:
+    req = CreateSpeechRequest(
+        input="hello",
+        task_type="CustomVoice",
+        non_streaming_mode=True,
+    )
+
+    gen_req = SpeechRequestValidator(default_model="qwen3-tts").build_generate_request(
+        req
+    )
+
+    assert gen_req.metadata["tts_params"]["non_streaming_mode"] is True
+    assert "non_streaming_mode" not in (
+        SpeechRequestValidator(default_model="qwen3-tts")
+        .build_generate_request(CreateSpeechRequest(input="hello"))
+        .metadata["tts_params"]
+    )
+
+
 def test_transcription_request_builds_asr_generate_request() -> None:
     gen_req = build_transcription_generate_request(
         audio_bytes=b"RIFF",
