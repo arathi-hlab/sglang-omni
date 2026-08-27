@@ -8,6 +8,7 @@ from benchmarks.dataset.seedtts import SampleInput
 from benchmarks.eval.benchmark_tts_seedtts import (
     TtsSeedttsBenchmarkConfig,
     _build_arg_parser,
+    _build_generation_kwargs,
     _build_results_config,
     _config_from_args,
     _parse_concurrencies,
@@ -77,6 +78,24 @@ def test_seedtts_benchmark_quantization_defaults_to_none() -> None:
     assert config.quantization is None
     results_config = _build_results_config(config, base_url="http://localhost:8000")
     assert results_config["quantization"] is None
+
+
+def test_seedtts_benchmark_forwards_non_streaming_mode() -> None:
+    config = _config_from_cli("--non-streaming-mode")
+    assert config.non_streaming_mode is True
+    assert _build_generation_kwargs(config)["non_streaming_mode"] is True
+    results_config = _build_results_config(config, base_url="http://localhost:8000")
+    assert results_config["non_streaming_mode"] is True
+
+    default = _config_from_cli()
+    assert default.non_streaming_mode is None
+    assert "non_streaming_mode" not in _build_generation_kwargs(default)
+    assert (
+        _build_results_config(default, base_url="http://localhost:8000")[
+            "non_streaming_mode"
+        ]
+        is None
+    )
 
 
 def test_parse_concurrencies() -> None:

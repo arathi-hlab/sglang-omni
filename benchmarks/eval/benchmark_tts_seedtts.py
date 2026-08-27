@@ -262,6 +262,7 @@ class TtsSeedttsBenchmarkConfig:
     concurrency: int = DEFAULT_TTS_BENCHMARK_CONCURRENCY
     request_rate: float = float("inf")
     stream: bool = False
+    non_streaming_mode: bool | None = None
     initial_codec_chunk_frames: int | None = None
     disable_tqdm: bool = False
     max_running_requests: int = 64
@@ -301,6 +302,8 @@ def _build_generation_kwargs(config: TtsSeedttsBenchmarkConfig) -> dict:
         generation_kwargs["repetition_penalty"] = config.repetition_penalty
     if config.seed is not None:
         generation_kwargs["seed"] = config.seed
+    if config.non_streaming_mode is not None:
+        generation_kwargs["non_streaming_mode"] = config.non_streaming_mode
     return generation_kwargs
 
 
@@ -321,6 +324,7 @@ def _build_results_config(
         "task_type": config.task_type,
         "instructions": config.instructions,
         "stream": config.stream,
+        "non_streaming_mode": config.non_streaming_mode,
         "max_samples": config.max_samples,
         "sample_offset": config.sample_offset,
         "max_new_tokens": config.max_new_tokens,
@@ -486,6 +490,7 @@ def _config_from_args(args: argparse.Namespace) -> TtsSeedttsBenchmarkConfig:
         concurrency=args.concurrency,
         request_rate=args.request_rate,
         stream=args.stream,
+        non_streaming_mode=args.non_streaming_mode,
         initial_codec_chunk_frames=args.initial_codec_chunk_frames,
         disable_tqdm=args.disable_tqdm,
         max_running_requests=args.max_running_requests,
@@ -881,6 +886,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--stream",
         action="store_true",
         help="Use streaming for TTS generation.",
+    )
+    parser.add_argument(
+        "--non-streaming-mode",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Forward non_streaming_mode to /v1/audio/speech. "
+            "Use --non-streaming-mode for the Qwen3-TTS CustomVoice packed-text "
+            "compatibility path. Omitted requests keep the server default."
+        ),
     )
     parser.add_argument(
         "--initial-codec-chunk-frames",
