@@ -1,6 +1,6 @@
 # Development
 
-Run all commands from `sglang-omni-router/`. CI uses the same commands and the
+Run all commands from `sglang_omni_router/rust/`. CI uses the same commands and the
 committed `Cargo.lock`.
 
 ## Toolchains
