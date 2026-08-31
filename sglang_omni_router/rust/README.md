@@ -18,30 +18,30 @@ optimized binary:
 cargo build --release --locked
 ```
 
-Validate and run the one-worker chat example:
+Validate and run the two-worker Omni example:
 
 ```console
 ./target/release/sgl-omni-router \
-  --config examples/chat.toml \
+  --config examples/omni.toml \
   --check-config
 
 ./target/release/sgl-omni-router \
-  --config examples/chat.toml
+  --config examples/omni.toml
 ```
 
-The example expects its worker at `127.0.0.1:8000`. Once `/ready` returns
-`200`, send a request through the router:
+The example expects compatible workers at `127.0.0.1:8000` and
+`127.0.0.1:8001`. Once `/ready` returns `200`, send a request through the
+router:
 
 ```console
 curl --http1.1 http://127.0.0.1:30000/v1/chat/completions \
   --header 'content-type: application/json' \
   --data-binary \
-  '{"model":"chat-model","messages":[{"role":"user","content":"hello"}]}'
+  '{"model":"omni-model","messages":[{"role":"user","content":"hello"}]}'
 ```
 
 The checked examples are:
 
-- [chat.toml](examples/chat.toml): one text chat worker;
 - [omni.toml](examples/omni.toml): two replicas serving multimodal chat and
   audio output;
 - [tts.toml](examples/tts.toml): two replicas serving encoded speech and PCM
@@ -49,7 +49,7 @@ The checked examples are:
 - [asr.toml](examples/asr.toml): two replicas with separate transcription and
   translation capability rows.
 
-These manifests use generic safety limits, not performance-optimal values.
+These manifests use starting limits, not performance-optimal values.
 Set admission and worker capacities from the measured concurrency of the
 deployment. Configuration is strict: unknown fields, duplicate identities,
 invalid limits, or inconsistent capability rows fail `--check-config` and
@@ -167,8 +167,9 @@ also available and selects from current exact worker-capacity occupancy with
 deterministic ties. Neither policy is universally faster; qualify the policy
 with the deployment's models, topology, and workload.
 
-The listener must be loopback because the router has no client authentication.
-Use a separately managed local TLS/auth proxy when external access is needed.
+The listener accepts any configured numeric socket address. The router does not
+provide client authentication or TLS, so run it on a trusted network or behind
+an authenticated TLS proxy.
 
 ## Health, readiness, and shutdown
 
@@ -188,7 +189,7 @@ a failed shutdown.
 
 ## Operations
 
-The mandatory loopback boundary also owns these read-only routes:
+The router listener also owns these read-only routes:
 
 - `GET /v1/models`: startup-precomputed, sorted model inventory;
 - `GET /metrics`: Prometheus lifecycle, readiness, worker-state, admission,
