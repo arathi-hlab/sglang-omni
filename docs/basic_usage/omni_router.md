@@ -34,18 +34,10 @@ flowchart LR
 
 ## Installation
 
-Build and run the router on Linux. Install model workers by following the
+Install model workers by following the
 [SGLang-Omni installation guide](../get_started/installation.md) before
 configuring their URLs in the router. The router can run alongside the workers
-or on a separate Linux host with network access to them.
-
-Install the system build tools. Run these commands as root in a Debian or
-Ubuntu container; prefix them with `sudo` on a host:
-
-```console
-apt-get update
-apt-get install -y build-essential ca-certificates curl git
-```
+or on a separate host with network access to them.
 
 Install Rust with Rustup and verify the toolchain:
 
