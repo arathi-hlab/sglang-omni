@@ -78,9 +78,6 @@ def test_clip_length_past_the_native_limit_is_rejected():
     ],
 )
 def test_model_owned_fields_are_not_reachable_paths(path):
-    # The model-owned side of the contract lives on ClassVars: these are not
-    # fields, so the path does not even compile -- same as overriding
-    # ``architecture``.
     manager = ConfigManager(Qwen3ASRPipelineConfig(model_path="dummy"))
     with pytest.raises(ValueError, match=path.split(".", 1)[1]):
         manager.merge_config({path: "1"})

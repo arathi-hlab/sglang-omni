@@ -362,7 +362,7 @@ class AudioChunkingConfig(BaseModel):
 
     These are the knobs a deployment may set (YAML or dotted CLI overrides).
     The model-owned side of the contract -- whether chunking is allowed at
-    all, the native clip limit, the tail floor -- lives on ``PipelineConfig``
+    all, the native clip limit, the tail floor -- lives on PipelineConfig
     ClassVars, out of reach of configuration.
     """
 
@@ -447,10 +447,10 @@ class PipelineConfig(BaseModel):
     speech_reference_text_excludes_instructions: ClassVar[bool] = False
     additional_speech_languages: ClassVar[frozenset[str]] = frozenset()
 
-    # The model-owned parameters of the long-audio transcription contract.
-    # Chunking stays off by default: some models can't correctly transcribe an
-    # isolated chunk (e.g. diarization tracks speakers across the whole
-    # recording).
+    # Note (Jeffro): the model-owned parameters of the long-audio transcription
+    # contract. Chunking stays off by default: some models can't correctly
+    # transcribe an isolated chunk (e.g. diarization tracks speakers across the
+    # whole recording).
     allow_audio_chunking: ClassVar[bool] = (
         False  # Whether the model can correctly transcribe an isolated chunk.
     )
