@@ -692,11 +692,13 @@ class Qwen3TTSStreamingVocoderScheduler(
         *,
         is_final: bool,
     ) -> torch.Tensor | None:
+        force_legacy_decode = False
         if self._enable_stateful_codec_decoder and not state.incremental_codec_fallback:
             try:
                 incremental = self._decode_incremental_eager(state)
             except Exception:
                 state.incremental_codec_fallback = True
+                force_legacy_decode = True
                 logger.warning(
                     "Qwen3-TTS stateful codec decode failed for %r; using the "
                     "legacy left-context decoder for the rest of the request",
@@ -712,7 +714,7 @@ class Qwen3TTSStreamingVocoderScheduler(
                 self._prune_incremental_codes(state)
                 return delta
 
-        plan = self._build_decode_plan(state, is_final=is_final)
+        plan = self._build_decode_plan(state, is_final=is_final or force_legacy_decode)
         if plan is None:
             return None
         handle = self._launch_decode_plans([plan], stream=self._decode_stream)
