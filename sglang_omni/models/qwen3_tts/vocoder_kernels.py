@@ -35,6 +35,8 @@ and every entry point degrades to None / the eager arithmetic.
 
 from __future__ import annotations
 
+import logging
+
 import torch
 
 try:  # keep the module importable when Triton is unavailable
@@ -52,6 +54,8 @@ except Exception:  # pragma: no cover
 _ALLOWED_CHANNELS = frozenset((1536, 768, 384, 192, 96))
 _MAX_BATCH = 8
 _MAX_T = 65536
+
+logger = logging.getLogger(__name__)
 
 if _HAS_TRITON:
 
@@ -217,6 +221,18 @@ def _prewarm(device: torch.device) -> None:
             _launch(x, ab, ab)
 
 
+def _prewarm_replacements(
+    replacements: list[tuple[torch.nn.Module, str]],
+) -> None:
+    devices = {
+        getattr(parent, name).alpha.device
+        for parent, name in replacements
+        if getattr(parent, name).alpha.device.type == "cuda"
+    }
+    for device in devices:
+        _prewarm(device)
+
+
 def fuse_vocoder_decoder(decoder: torch.nn.Module) -> int:
     """Replace every SnakeBeta in decoder with FusedSnakeBeta.
 
@@ -230,19 +246,21 @@ def fuse_vocoder_decoder(decoder: torch.nn.Module) -> int:
         for name, child in module.named_children():
             if _is_snake_beta(child):
                 replacements.append((module, name))
-    for parent, name in replacements:
-        setattr(parent, name, FusedSnakeBeta(getattr(parent, name)))
 
     if replacements and _HAS_TRITON and torch.cuda.is_available():
         try:
-            device = replacements[0][0].__getattr__(replacements[0][1]).alpha.device
+            # Note(Jiaxin): compile before mutating the decoder so a failed
+            # prewarm leaves the proven eager implementation intact.
+            _prewarm_replacements(replacements)
         except Exception:
-            device = None
-        if device is not None and device.type == "cuda":
-            try:
-                _prewarm(device)
-            except Exception:  # pragma: no cover
-                pass
+            logger.warning(
+                "Qwen3-TTS fused SnakeBeta prewarm failed; keeping eager modules",
+                exc_info=True,
+            )
+            return 0
+
+    for parent, name in replacements:
+        setattr(parent, name, FusedSnakeBeta(getattr(parent, name)))
     return len(replacements)
 
 
