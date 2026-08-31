@@ -34,36 +34,47 @@ flowchart LR
 
 ## Installation
 
-Install model workers by following the
-[SGLang-Omni installation guide](../get_started/installation.md) before
-configuring their URLs in the router. The router can run alongside the workers
-or on a separate host with network access to them.
+### Prerequisites
 
-Install Rust with Rustup and verify the toolchain:
+- **Rust and Cargo**
 
-```console
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-rustc --version
-cargo --version
-```
+  ```bash
+  # Install rustup (Rust installer and version manager)
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-Clone SGLang-Omni and build the optimized router binary:
+  # Reload shell environment
+  source "$HOME/.cargo/env"
 
-```console
+  # Verify installation
+  rustc --version
+  cargo --version
+  ```
+
+- One or more model workers installed using the
+  [SGLang-Omni installation guide](../get_started/installation.md).
+
+The router manages traffic. It does not launch or supervise model workers.
+
+### Rust Binary
+
+```bash
 git clone https://github.com/sgl-project/sglang-omni.git
 cd sglang-omni/sglang_omni_router/rust
+
+# Build release binary
 cargo build --release --locked
-./target/release/sgl-omni-router --version
 ```
 
 `rust-toolchain.toml` selects the supported Rust toolchain. The optimized
-binary is written to `target/release/sgl-omni-router`. The router uses Rustls
-and does not require Python, Python bindings, or system OpenSSL packages.
+binary is written to `target/release/sgl-omni-router`.
 
-The router manages traffic. It does not launch or supervise model workers.
-Deploy it on a trusted network between clients and workers or behind an
-authenticated TLS proxy.
+## Checking Version
+
+After installation, verify the installation and check the version:
+
+```bash
+./target/release/sgl-omni-router --version
+```
 
 ## Quick Start
 
