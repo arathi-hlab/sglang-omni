@@ -610,7 +610,10 @@ fn graceful_shutdown_stops_accepting_before_connections_finish() {
             Err(error)
                 if matches!(
                     error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::ConnectionReset
                 ) => {}
             Err(error) => panic!("unexpected connection result during drain: {error}"),
         }
