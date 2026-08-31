@@ -735,14 +735,17 @@ class Qwen3TTSStreamingVocoderScheduler(
             return None
 
         committed_state = state.incremental_codec_state
-        candidate_state = (
-            Qwen3TTSIncrementalCodecState()
-            if committed_state is None
-            else committed_state.clone()
-        )
+        if committed_state is None:
+            if state.emitted_generated_frames:
+                raise RuntimeError(
+                    "Qwen3-TTS incremental codec state is missing after emitted frames"
+                )
+            candidate_state = Qwen3TTSIncrementalCodecState()
+        else:
+            candidate_state = committed_state.clone()
         consumed_frames = candidate_state.frame_position
         expected_consumed_frames = state.ref_frames + state.emitted_generated_frames
-        if consumed_frames != expected_consumed_frames:
+        if committed_state is not None and consumed_frames != expected_consumed_frames:
             raise RuntimeError(
                 "Qwen3-TTS incremental codec position does not match emitted frames"
             )
