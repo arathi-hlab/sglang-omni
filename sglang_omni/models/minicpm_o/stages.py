@@ -1,0 +1,124 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Stage executor factories for the MiniCPM-o pipeline (text path)."""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+
+from sglang_omni.proto import StagePayload
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Simple stages — return SimpleScheduler
+# ---------------------------------------------------------------------------
+
+
+def create_preprocessing_executor(
+    model_path: str,
+    *,
+    max_seq_len: int | None = None,
+):
+    from sglang_omni.models.minicpm_o.components.preprocessor import (
+        MiniCPMOPreprocessor,
+    )
+    from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+
+    preprocessor = MiniCPMOPreprocessor(model_path, max_seq_len=max_seq_len)
+
+    async def _preprocess(payload: StagePayload) -> StagePayload:
+        return await preprocessor(payload)
+
+    return SimpleScheduler(_preprocess)
+
+
+def create_aggregate_executor():
+    from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+
+    def _identity(payload: StagePayload) -> StagePayload:
+        return payload
+
+    return SimpleScheduler(_identity)
+
+
+def create_decode_executor(model_path: str):
+    # State keys deliberately mirror qwen3_omni, so its streaming text
+    # detokenizer applies unchanged.
+    from sglang_omni.models.qwen3_omni.components.streaming_detokenizer import (
+        create_streaming_detokenize_scheduler,
+    )
+
+    return create_streaming_detokenize_scheduler(model_path)
+
+
+# ---------------------------------------------------------------------------
+# AR stages — return OmniScheduler
+# ---------------------------------------------------------------------------
+
+
+def create_sglang_thinker_executor_from_config(
+    model_path: str,
+    *,
+    gpu_id: int = 0,
+    tp_rank: int = 0,
+    tp_size: int = 1,
+    nccl_port: int | None = None,
+    max_seq_len: int = 8192,
+    server_args_overrides: dict[str, Any] | None = None,
+    total_gpu_memory_fraction: float | None = None,
+    enable_async_decode: bool = True,
+    async_decode_min_batch_size: int = 2,
+):
+    """Returns OmniScheduler for the MiniCPM-o thinker."""
+    from sglang_omni.models.minicpm_o.bootstrap import create_thinker_scheduler
+    from sglang_omni.scheduling.generation_batch_policy import (
+        build_generation_batch_overrides,
+        validate_generation_batch_policy,
+    )
+    from sglang_omni.scheduling.sglang_backend import build_sglang_server_args
+    from sglang_omni.utils.misc import avail_gpu_mem
+
+    overrides = build_generation_batch_overrides(
+        max_running_requests=64,
+        server_args_overrides=server_args_overrides,
+        disable_cuda_graph=False,
+        enable_mixed_chunk=True,
+        chunked_prefill_size=8192,
+        sampling_backend="pytorch",
+    )
+    overrides["tp_size"] = tp_size
+    server_args = build_sglang_server_args(
+        model_path,
+        context_length=max_seq_len,
+        **overrides,
+    )
+    validate_generation_batch_policy(
+        model_name="MiniCPM-o thinker",
+        server_args=server_args,
+    )
+
+    logger.info(
+        f"sglang_ar_startup stage=thinker gpu_id={gpu_id} tp_rank={tp_rank}/{tp_size} "
+        f"context_length={max_seq_len} "
+        f"total_gpu_memory_fraction={total_gpu_memory_fraction} "
+        f"mem_fraction_static={server_args.mem_fraction_static} "
+        f"pre_load_avail_mem={avail_gpu_mem(gpu_id)} "
+        f"pid={os.getpid()}"
+    )
+    scheduler = create_thinker_scheduler(
+        server_args,
+        gpu_id,
+        tp_rank=tp_rank,
+        nccl_port=nccl_port,
+        total_gpu_memory_fraction=total_gpu_memory_fraction,
+        enable_async_decode=enable_async_decode,
+        async_decode_min_batch_size=async_decode_min_batch_size,
+    )
+    logger.info(
+        f"sglang_ar_started stage=thinker gpu_id={gpu_id} "
+        f"post_load_avail_mem={avail_gpu_mem(gpu_id)} pid={os.getpid()}"
+    )
+    return scheduler

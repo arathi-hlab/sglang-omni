@@ -103,6 +103,12 @@ class ModelWorker:
             )
 
             register_ming_tts_hf_config()
+        if self.model_arch_override == "MiniCPMO":
+            from sglang_omni.models.minicpm_o.hf_config import (
+                register_minicpm_o_hf_config,
+            )
+
+            register_minicpm_o_hf_config()
         if self.model_arch_override == "DotsTTSForConditionalGeneration":
             from sglang_omni.models.dots_tts.hf_config import (
                 register_dots_tts_hf_config,
