@@ -1,5 +1,6 @@
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
@@ -128,42 +129,37 @@ async fn serve_http(
                     result.map_err(io::Error::other)?;
                 }
             }
-            accepted = listener.accept() => match accepted {
-                Ok((io, peer)) => {
-                    let app = app.clone();
-                    let mut shutdown = connection_shutdown.subscribe();
-                    connections.spawn(async move {
-                        let mut builder = http1::Builder::new();
-                        builder
-                            .timer(TokioTimer::new())
-                            .header_read_timeout(header_read_timeout);
-                        let connection = builder
-                            .serve_connection(TokioIo::new(io), TowerToHyperService::new(app))
-                            .with_upgrades();
-                        tokio::pin!(connection);
-                        tokio::select! {
-                            result = connection.as_mut() => {
-                                if let Err(error) = result {
-                                    trace!(%peer, %error, "client connection closed with an HTTP error");
-                                }
-                            }
-                            _ = shutdown.changed() => {
-                                connection.as_mut().graceful_shutdown();
-                                if let Err(error) = connection.await {
-                                    trace!(%peer, %error, "client connection closed with an HTTP error");
-                                }
+            (io, peer) = accept_connection(&listener) => {
+                let app = app.clone();
+                let mut shutdown = connection_shutdown.subscribe();
+                connections.spawn(async move {
+                    let mut builder = http1::Builder::new();
+                    builder
+                        .timer(TokioTimer::new())
+                        .header_read_timeout(header_read_timeout);
+                    let connection = builder
+                        .serve_connection(TokioIo::new(io), TowerToHyperService::new(app))
+                        .with_upgrades();
+                    tokio::pin!(connection);
+                    tokio::select! {
+                        result = connection.as_mut() => {
+                            if let Err(error) = result {
+                                trace!(%peer, %error, "client connection closed with an HTTP error");
                             }
                         }
-                    });
-                }
-                Err(error) if is_transient_accept_error(&error) => {
-                    trace!(%error, "transient client accept error");
-                }
-                Err(error) => return Err(error),
-            },
+                        _ = shutdown.changed() => {
+                            connection.as_mut().graceful_shutdown();
+                            if let Err(error) = connection.await {
+                                trace!(%peer, %error, "client connection closed with an HTTP error");
+                            }
+                        }
+                    }
+                });
+            }
         }
     }
 
+    drop(listener);
     let _notified = connection_shutdown.send(());
     while let Some(joined) = connections.join_next().await {
         joined.map_err(io::Error::other)?;
@@ -171,14 +167,30 @@ async fn serve_http(
     Ok(())
 }
 
-fn is_transient_accept_error(error: &io::Error) -> bool {
-    matches!(
+async fn accept_connection(
+    listener: &BoundedTcpListener,
+) -> (bounded_listener::ConnectionIo, std::net::SocketAddr) {
+    loop {
+        match listener.accept().await {
+            Ok(connection) => return connection,
+            Err(error) => handle_accept_error(&error).await,
+        }
+    }
+}
+
+async fn handle_accept_error(error: &io::Error) {
+    if matches!(
         error.kind(),
         io::ErrorKind::ConnectionRefused
             | io::ErrorKind::ConnectionAborted
             | io::ErrorKind::ConnectionReset
-            | io::ErrorKind::Interrupted
-    )
+    ) {
+        trace!(%error, "client connection failed during accept");
+        return;
+    }
+
+    error!(%error, "client accept failed; retrying");
+    tokio::time::sleep(Duration::from_secs(1)).await;
 }
 
 fn route_table(lifecycle: Arc<Lifecycle>) -> Router {
@@ -254,7 +266,7 @@ mod tests {
     use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, oneshot};
     use tokio::task::JoinHandle;
 
-    use super::{BoundedTcpListener, Router, is_transient_accept_error, serve_http};
+    use super::{BoundedTcpListener, Router, serve_http};
 
     const TEST_TIMEOUT: Duration = Duration::from_millis(100);
 
@@ -563,19 +575,5 @@ mod tests {
         release.add_permits(1);
         wait_for_available(&permits, 1).await;
         drop(stream);
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn resource_accept_errors_are_fatal() {
-        assert!(!is_transient_accept_error(&io::Error::from_raw_os_error(
-            24
-        )));
-        assert!(!is_transient_accept_error(&io::Error::from_raw_os_error(
-            23
-        )));
-        assert!(is_transient_accept_error(&io::Error::from(
-            io::ErrorKind::ConnectionAborted
-        )));
     }
 }

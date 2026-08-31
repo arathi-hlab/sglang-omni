@@ -37,9 +37,19 @@ impl TestDir {
         max_connections: usize,
         drain_timeout_ms: u64,
     ) -> PathBuf {
+        self.config_with_timeouts(address, max_connections, 300, drain_timeout_ms)
+    }
+
+    fn config_with_timeouts(
+        &self,
+        address: SocketAddr,
+        max_connections: usize,
+        header_read_timeout_ms: u64,
+        drain_timeout_ms: u64,
+    ) -> PathBuf {
         let path = self.0.join("router.toml");
         let contents = format!(
-            "schema_version = 1\n\n[server]\nlisten = \"{address}\"\nmax_connections = {max_connections}\nheader_read_timeout_ms = 300\n\n[shutdown]\ndrain_timeout_ms = {drain_timeout_ms}\n\n[logging]\nformat = \"json\"\nfilter = \"info\"\n"
+            "schema_version = 1\n\n[server]\nlisten = \"{address}\"\nmax_connections = {max_connections}\nheader_read_timeout_ms = {header_read_timeout_ms}\n\n[shutdown]\ndrain_timeout_ms = {drain_timeout_ms}\n\n[logging]\nformat = \"json\"\nfilter = \"info\"\n"
         );
         fs::write(&path, contents).expect("write isolated process config");
         path
@@ -524,20 +534,55 @@ fn graceful_shutdown_closes_partial_connection_and_releases_capacity() {
 }
 
 #[test]
-fn short_drain_deadline_still_closes_partial_connection_cleanly() {
+fn graceful_shutdown_stops_accepting_before_connections_finish() {
     let _process_guard = process_lock();
     let directory = TestDir::new();
     let address = unused_address();
-    let config = directory.config(address, 1, 100);
+    let config = directory.config_with_timeouts(address, 1, 1_000, 3_000);
     let mut child = ChildGuard::spawn(&config);
     wait_until_live(address, &mut child);
 
     let partial = active_partial_connection(address);
-    let queued = request_blocked_by_connection_cap(address);
     signal(child.id(), "-TERM");
-    assert_eq!(child.wait(PROCESS_DEADLINE).code(), Some(0));
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match TcpStream::connect_timeout(&address, Duration::from_millis(20)) {
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => break,
+            Ok(stream) => drop(stream),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => panic!("unexpected connection result during drain: {error}"),
+        }
+        child.assert_running();
+        assert!(
+            Instant::now() < deadline,
+            "listener remained open after graceful shutdown started"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    child.assert_running();
+
     drop(partial);
-    drop(queued);
-    let reused = TcpListener::bind(address).expect("listener is reusable after drain timeout");
+    assert_eq!(child.wait(PROCESS_DEADLINE).code(), Some(0));
+}
+
+#[test]
+fn drain_deadline_aborts_a_partial_connection() {
+    let _process_guard = process_lock();
+    let directory = TestDir::new();
+    let address = unused_address();
+    let config = directory.config_with_timeouts(address, 1, 5_000, 100);
+    let mut child = ChildGuard::spawn(&config);
+    wait_until_live(address, &mut child);
+
+    let partial = active_partial_connection(address);
+    signal(child.id(), "-TERM");
+    assert_eq!(child.wait(PROCESS_DEADLINE).code(), Some(1));
+    drop(partial);
+    let reused = TcpListener::bind(address).expect("listener is reusable after forced drain");
     drop(reused);
 }
