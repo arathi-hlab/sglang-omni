@@ -526,7 +526,7 @@ For a source checkout without installed console scripts, verify the module entry
 point with:
 
 ```bash
-python -m sglang_omni_router.serve --help
+python -m sglang_omni_router.python.serve --help
 ```
 
 ## Durable Router State
@@ -575,7 +575,7 @@ In a container, mount it on a persistent volume:
 
 ```bash
 docker run -v /srv/sglang-omni-router:/var/lib/sglang-omni-router ... \
-  python -m sglang_omni_router.serve \
+  python -m sglang_omni_router.python.serve \
     --router-state-dir /var/lib/sglang-omni-router \
     --worker-urls http://127.0.0.1:8011
 ```

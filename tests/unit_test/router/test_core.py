@@ -621,10 +621,21 @@ def test_router_config_rejects_hyphenated_policy_aliases() -> None:
         )
 
 
-def test_python_router_console_script_entrypoint_resolves() -> None:
+@pytest.mark.parametrize(
+    "manifest_name",
+    (
+        "pyproject.toml",
+        "pyproject_rocm.toml",
+        "pyproject_xpu.toml",
+        "pyproject_npu.toml",
+    ),
+)
+def test_python_router_console_script_entrypoint_resolves(
+    manifest_name: str,
+) -> None:
     script_target = None
     in_project_scripts = False
-    pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
+    pyproject = Path(__file__).resolve().parents[3] / manifest_name
     for line in pyproject.read_text().splitlines():
         stripped = line.strip()
         if stripped == "[project.scripts]":
