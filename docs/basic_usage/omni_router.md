@@ -187,6 +187,13 @@ The first `SIGINT` or `SIGTERM` fails readiness, closes admission, stops new
 dispatch, asks tracked WebSockets to close, stops health work, and joins owned
 work within `shutdown.drain_timeout_ms`. A second signal forces shutdown.
 
+`server.header_read_timeout_ms` reclaims idle HTTP/1 connections while waiting
+for an initial or keep-alive request head. It does not bound request bodies,
+responses, streams, or WebSocket sessions. On POSIX systems,
+`server.max_connections` must also fit below the process `RLIMIT_NOFILE` soft
+limit with room for the listener; size the remaining descriptor capacity for
+the enabled upstream and operational connections.
+
 ## Current scope
 
 The Rust router uses one static manifest and one multi-threaded process. It does

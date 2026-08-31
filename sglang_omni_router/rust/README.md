@@ -171,6 +171,14 @@ The listener accepts any configured numeric socket address. The router does not
 provide client authentication or TLS, so run it on a trusted network or behind
 an authenticated TLS proxy.
 
+`server.header_read_timeout_ms` limits only the time allowed to receive each
+initial or keep-alive HTTP/1 request head; it does not limit request bodies,
+responses, streaming, or WebSocket sessions. On POSIX systems, startup also
+rejects a `server.max_connections` value that cannot fit alongside the listener
+under the process `RLIMIT_NOFILE` soft limit. Runtime accept failures remain
+fatal because the complete process-wide descriptor budget depends on enabled
+router features and workload.
+
 ## Health, readiness, and shutdown
 
 - `GET /live` reports process liveness.

@@ -39,7 +39,7 @@ impl TestDir {
     ) -> PathBuf {
         let path = self.0.join("router.toml");
         let contents = format!(
-            "schema_version = 1\n\n[server]\nlisten = \"{address}\"\nmax_connections = {max_connections}\n\n[shutdown]\ndrain_timeout_ms = {drain_timeout_ms}\n\n[logging]\nformat = \"json\"\nfilter = \"info\"\n"
+            "schema_version = 1\n\n[server]\nlisten = \"{address}\"\nmax_connections = {max_connections}\nheader_read_timeout_ms = 300\n\n[shutdown]\ndrain_timeout_ms = {drain_timeout_ms}\n\n[logging]\nformat = \"json\"\nfilter = \"info\"\n"
         );
         fs::write(&path, contents).expect("write isolated process config");
         path
@@ -64,6 +64,22 @@ impl ChildGuard {
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn production router binary");
+        Self(child)
+    }
+
+    fn spawn_with_nofile(config: &PathBuf, soft_limit: u64) -> Self {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("ulimit -n \"$1\" && exec \"$2\" --config \"$3\"")
+            .arg("sh")
+            .arg(soft_limit.to_string())
+            .arg(env!("CARGO_BIN_EXE_sgl-omni-router"))
+            .arg(config)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn router with bounded RLIMIT_NOFILE");
         Self(child)
     }
 
@@ -346,6 +362,19 @@ fn invalid_connection_caps_fail_check_config_with_exit_two() {
 }
 
 #[test]
+fn impossible_nofile_limit_fails_before_serving() {
+    let _process_guard = process_lock();
+    let directory = TestDir::new();
+    let address = unused_address();
+    let config = directory.config(address, 128, 1_000);
+    let mut child = ChildGuard::spawn_with_nofile(&config, 32);
+
+    assert_eq!(child.wait(PROCESS_DEADLINE).code(), Some(1));
+    TcpStream::connect_timeout(&address, Duration::from_millis(100))
+        .expect_err("invalid file limit must fail before the service becomes live");
+}
+
+#[test]
 fn invalid_cli_and_config_exit_two_without_disclosing_contents() {
     let _process_guard = process_lock();
     let cli = Command::new(env!("CARGO_BIN_EXE_sgl-omni-router"))
@@ -446,7 +475,7 @@ fn rapid_distinct_signals_force_process_exit_with_an_active_connection() {
 }
 
 #[test]
-fn connection_cap_holds_the_next_request_until_capacity_returns() {
+fn idle_keep_alive_connections_release_capacity_at_header_deadline() {
     let _process_guard = process_lock();
     let directory = TestDir::new();
     let address = unused_address();
@@ -454,21 +483,19 @@ fn connection_cap_holds_the_next_request_until_capacity_returns() {
     let mut child = ChildGuard::spawn(&config);
     wait_until_live(address, &mut child);
 
-    let mut held = Vec::new();
-    for _ in 0..2 {
-        held.push(confirmed_keep_alive_connection(address));
-    }
+    let held = (0..2)
+        .map(|_| confirmed_keep_alive_connection(address))
+        .collect::<Vec<_>>();
 
     let mut waiting = request_blocked_by_connection_cap(address);
 
-    drop(held.remove(0));
     waiting
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("set bounded resumed-response timeout");
     let mut response = String::new();
     waiting
         .read_to_string(&mut response)
-        .expect("read response after capacity returns");
+        .expect("read response after bounded idle reclamation");
     assert!(response.starts_with("HTTP/1.1 200"));
     assert!(response.ends_with("live\n"));
 
@@ -478,7 +505,7 @@ fn connection_cap_holds_the_next_request_until_capacity_returns() {
 }
 
 #[test]
-fn graceful_shutdown_waits_for_capped_connection_to_release() {
+fn graceful_shutdown_closes_partial_connection_and_releases_capacity() {
     let _process_guard = process_lock();
     let directory = TestDir::new();
     let address = unused_address();
@@ -489,18 +516,15 @@ fn graceful_shutdown_waits_for_capped_connection_to_release() {
     let partial = active_partial_connection(address);
     let queued = request_blocked_by_connection_cap(address);
     signal(child.id(), "-TERM");
-    thread::sleep(Duration::from_millis(100));
-    child.assert_running();
-
-    drop(partial);
     assert_eq!(child.wait(PROCESS_DEADLINE).code(), Some(0));
+    drop(partial);
     drop(queued);
     let reused = TcpListener::bind(address).expect("listener is reusable after capped drain");
     drop(reused);
 }
 
 #[test]
-fn drain_timeout_terminates_with_capped_connection() {
+fn short_drain_deadline_still_closes_partial_connection_cleanly() {
     let _process_guard = process_lock();
     let directory = TestDir::new();
     let address = unused_address();
@@ -511,7 +535,7 @@ fn drain_timeout_terminates_with_capped_connection() {
     let partial = active_partial_connection(address);
     let queued = request_blocked_by_connection_cap(address);
     signal(child.id(), "-TERM");
-    assert_eq!(child.wait(PROCESS_DEADLINE).code(), Some(1));
+    assert_eq!(child.wait(PROCESS_DEADLINE).code(), Some(0));
     drop(partial);
     drop(queued);
     let reused = TcpListener::bind(address).expect("listener is reusable after drain timeout");

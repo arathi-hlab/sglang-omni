@@ -59,6 +59,21 @@ pub enum RouterError {
     /// The configured listener could not be bound.
     #[error("failed to bind the configured listener")]
     Bind(#[source] io::Error),
+    /// The process file-descriptor limit could not be inspected.
+    #[cfg(unix)]
+    #[error("failed to read the process RLIMIT_NOFILE soft limit")]
+    FileLimit(#[source] io::Error),
+    /// The listener and configured accepted sockets cannot fit under RLIMIT_NOFILE.
+    #[cfg(unix)]
+    #[error(
+        "server.max_connections ({max_connections}) plus the listener exceeds the RLIMIT_NOFILE soft limit ({soft_limit}); raise the soft limit or lower server.max_connections"
+    )]
+    InsufficientFileLimit {
+        /// Configured accepted-socket ceiling.
+        max_connections: usize,
+        /// Process soft file-descriptor limit.
+        soft_limit: u64,
+    },
     /// The HTTP server stopped without a shutdown request.
     #[error("the local HTTP server stopped unexpectedly")]
     Server(#[source] io::Error),
@@ -87,6 +102,8 @@ impl RouterError {
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::Config(_) => 2,
+            #[cfg(unix)]
+            Self::FileLimit(_) | Self::InsufficientFileLimit { .. } => 1,
             Self::LoggingFilter { .. }
             | Self::TracingInit { .. }
             | Self::RuntimeBuild(_)

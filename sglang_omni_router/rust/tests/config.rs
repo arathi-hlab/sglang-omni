@@ -49,17 +49,25 @@ fn with_max_connections(config: String, max_connections: usize) -> String {
     )
 }
 
+fn with_header_timeout(config: String, timeout_ms: u64) -> String {
+    config.replace(
+        "listen = \"127.0.0.1:30000\"",
+        &format!("listen = \"127.0.0.1:30000\"\nheader_read_timeout_ms = {timeout_ms}"),
+    )
+}
+
 fn load_bytes(contents: &[u8]) -> Result<Config, ConfigError> {
     let directory = TestDir::new();
     Config::load(&directory.write(contents))
 }
 
 #[test]
-fn omitted_connection_cap_defaults_to_1024() {
+fn omitted_server_limits_use_bounded_defaults() {
     let config = load_bytes(valid_config("127.0.0.1:30000", 30_000, "info").as_bytes())
         .expect("complete strict configuration should be valid");
     assert_eq!(config.server.listen.to_string(), "127.0.0.1:30000");
     assert_eq!(config.server.max_connections, 1024);
+    assert_eq!(config.server.header_read_timeout().as_millis(), 30_000);
     assert_eq!(config.shutdown.drain_timeout().as_millis(), 30_000);
 }
 
@@ -113,6 +121,7 @@ fn rejects_invalid_address_timeout_format_and_filter() {
         valid_config("127.0.0.1:30000", 30_000, "[invalid"),
         valid_config("127.0.0.1:30000", 30_000, "info")
             .replace("format = \"json\"", "format = \"yaml\""),
+        with_header_timeout(valid_config("127.0.0.1:30000", 30_000, "info"), 0),
     ];
 
     for contents in cases {

@@ -32,6 +32,7 @@ pub enum RunOutcome {
 /// clean or forced shutdown path.
 pub fn execute(config_path: &Path, check_config: bool) -> Result<RunOutcome, RouterError> {
     let config = Config::load(config_path)?;
+    validate_file_limit(&config)?;
     if check_config {
         return Ok(RunOutcome::ConfigValid);
     }
@@ -45,6 +46,38 @@ pub fn execute(config_path: &Path, check_config: bool) -> Result<RunOutcome, Rou
         .map_err(RouterError::RuntimeBuild)?;
     runtime.block_on(server::serve(config))?;
     Ok(RunOutcome::CleanShutdown)
+}
+
+#[cfg(unix)]
+fn validate_file_limit(config: &Config) -> Result<(), RouterError> {
+    let (soft_limit, _) = rlimit::Resource::NOFILE
+        .get()
+        .map_err(RouterError::FileLimit)?;
+    if soft_limit == rlimit::INFINITY {
+        return Ok(());
+    }
+
+    let max_connections = u64::try_from(config.server.max_connections).map_err(|_| {
+        RouterError::InsufficientFileLimit {
+            max_connections: config.server.max_connections,
+            soft_limit,
+        }
+    })?;
+    if max_connections
+        .checked_add(1)
+        .is_none_or(|minimum| minimum > soft_limit)
+    {
+        return Err(RouterError::InsufficientFileLimit {
+            max_connections: config.server.max_connections,
+            soft_limit,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_file_limit(_config: &Config) -> Result<(), RouterError> {
+    Ok(())
 }
 
 fn init_tracing(config: &Config) -> Result<(), RouterError> {
