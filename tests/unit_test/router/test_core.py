@@ -621,7 +621,7 @@ def test_router_config_rejects_hyphenated_policy_aliases() -> None:
         )
 
 
-def test_router_console_script_entrypoint_resolves() -> None:
+def test_python_router_console_script_entrypoint_resolves() -> None:
     script_target = None
     in_project_scripts = False
     pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
@@ -632,7 +632,7 @@ def test_router_console_script_entrypoint_resolves() -> None:
             continue
         if in_project_scripts and stripped.startswith("["):
             break
-        if in_project_scripts and stripped.startswith("sgl-omni-router"):
+        if in_project_scripts and stripped.startswith("sgl-omni-router-py ="):
             script_target = stripped.split("=", 1)[1].strip().strip('"')
             break
 

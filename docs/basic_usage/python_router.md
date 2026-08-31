@@ -16,7 +16,7 @@ The router is an external HTTP process:
 client
   |
   v
-sgl-omni-router
+sgl-omni-router-py
   |
   +-- sgl-omni serve worker A
   +-- sgl-omni serve worker B
@@ -29,11 +29,11 @@ response with router diagnostic headers.
 
 ## Launch Workers and Router From YAML
 
-For a local homogeneous pool, `sgl-omni-router` can start the worker replicas
+For a local homogeneous pool, `sgl-omni-router-py` can start the worker replicas
 and then start the router after all managed workers pass `/health`:
 
 ```bash
-sgl-omni-router \
+sgl-omni-router-py \
   --host 0.0.0.0 \
   --port 8008 \
   --launcher-config examples/configs/qwen3_omni_router.yaml \
@@ -162,7 +162,7 @@ fragments.
 Start the router with the worker URLs:
 
 ```bash
-sgl-omni-router \
+sgl-omni-router-py \
   --host 0.0.0.0 \
   --port 8008 \
   --worker-urls http://127.0.0.1:8011 http://127.0.0.1:8012 \
@@ -233,7 +233,7 @@ only a subset of Omni capabilities:
 Then launch with:
 
 ```bash
-sgl-omni-router \
+sgl-omni-router-py \
   --host 0.0.0.0 \
   --port 8008 \
   --worker-config workers.json \
