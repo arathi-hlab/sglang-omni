@@ -34,11 +34,10 @@ flowchart LR
 
 ## Installation
 
-SGLang-Omni workers require a supported Linux NVIDIA/CUDA environment. Follow
-the [SGLang-Omni installation guide](../get_started/installation.md) on each
-worker host before starting the router. The router process does not use CUDA
-and can run in the same container or on a separate Linux host with network
-access to the workers.
+Build and run the router on Linux. Install model workers by following the
+[SGLang-Omni installation guide](../get_started/installation.md) before
+configuring their URLs in the router. The router can run alongside the workers
+or on a separate Linux host with network access to them.
 
 Install the system build tools. Run these commands as root in a Debian or
 Ubuntu container; prefix them with `sudo` on a host:
