@@ -195,8 +195,8 @@ dynamic worker CRUD or discovery, queues, circuit breakers, cache-aware or PD
 routing, CP/DP shared state, Python bindings, client authentication, or TLS.
 
 The Python router remains available for RL and Python-specific control-plane
-workflows. Run `python -m sglang_omni_router.python.serve --help` for its
-options.
+workflows. See the [Python router guide](python_router.md) for its complete
+configuration and operating model.
 
 ## Troubleshooting
 
@@ -209,4 +209,4 @@ options.
 | The router is unreachable remotely | Check `server.listen`, host firewall rules, and the deployment network |
 
 For the pinned Rust toolchain and local quality gates, see
-`sglang_omni_router/rust/DEVELOPMENT.md`.
+the [Rust development guide](../../sglang_omni_router/rust/DEVELOPMENT.md).
