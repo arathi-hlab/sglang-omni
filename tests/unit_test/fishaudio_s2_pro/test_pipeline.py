@@ -556,9 +556,7 @@ def test_s2pro_compile_helper_targets_forward_kvcached(
     monkeypatch.setattr(
         stages,
         "_warmup_s2pro_codebook_decoder",
-        lambda model, *, max_batch_size: warmup_calls.append(
-            (model, max_batch_size)
-        ),
+        lambda model, *, max_batch_size: warmup_calls.append((model, max_batch_size)),
     )
 
     class _Layer:
