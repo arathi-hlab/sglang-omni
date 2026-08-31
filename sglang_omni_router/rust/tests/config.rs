@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use sgl_omni_router::{Config, ConfigError};
+use sgl_omni_router::{Config, ConfigError, LogFormat};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -69,6 +69,14 @@ fn omitted_server_limits_use_bounded_defaults() {
     assert_eq!(config.server.max_connections, 1024);
     assert_eq!(config.server.header_read_timeout().as_millis(), 30_000);
     assert_eq!(config.shutdown.drain_timeout().as_millis(), 30_000);
+}
+
+#[test]
+fn compact_logging_format_selects_compact_output() {
+    let config = valid_config("127.0.0.1:30000", 30_000, "info")
+        .replace("format = \"json\"", "format = \"compact\"");
+    let config = load_bytes(config.as_bytes()).expect("compact logging format should be valid");
+    assert_eq!(config.logging.format, LogFormat::Compact);
 }
 
 #[test]

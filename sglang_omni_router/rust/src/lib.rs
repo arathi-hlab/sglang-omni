@@ -78,7 +78,7 @@ fn init_tracing(config: &Config) -> Result<(), RouterError> {
             .with(tracing_subscriber::fmt::layer().json())
             .try_init()
             .map_err(|source| RouterError::TracingInit { source }),
-        LogFormat::Pretty => registry
+        LogFormat::Compact => registry
             .with(tracing_subscriber::fmt::layer().compact())
             .try_init()
             .map_err(|source| RouterError::TracingInit { source }),

@@ -76,7 +76,7 @@ pub enum LogFormat {
     /// One JSON object per event.
     Json,
     /// Compact human-readable events.
-    Pretty,
+    Compact,
 }
 
 impl Config {
