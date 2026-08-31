@@ -32,11 +32,11 @@ pub enum RunOutcome {
 /// clean or forced shutdown path.
 pub fn execute(config_path: &Path, check_config: bool) -> Result<RunOutcome, RouterError> {
     let config = Config::load(config_path)?;
-    validate_file_limit(&config)?;
     if check_config {
         return Ok(RunOutcome::ConfigValid);
     }
 
+    prepare_file_limit(&config)?;
     init_tracing(&config)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_name("sgl-omni-router")
@@ -49,24 +49,10 @@ pub fn execute(config_path: &Path, check_config: bool) -> Result<RunOutcome, Rou
 }
 
 #[cfg(unix)]
-fn validate_file_limit(config: &Config) -> Result<(), RouterError> {
-    let (soft_limit, _) = rlimit::Resource::NOFILE
-        .get()
-        .map_err(RouterError::FileLimit)?;
-    if soft_limit == rlimit::INFINITY {
-        return Ok(());
-    }
-
-    let max_connections = u64::try_from(config.server.max_connections).map_err(|_| {
-        RouterError::InsufficientFileLimit {
-            max_connections: config.server.max_connections,
-            soft_limit,
-        }
-    })?;
-    if max_connections
-        .checked_add(1)
-        .is_none_or(|minimum| minimum > soft_limit)
-    {
+fn prepare_file_limit(config: &Config) -> Result<(), RouterError> {
+    let soft_limit = rlimit::increase_nofile_limit(u64::MAX).map_err(RouterError::FileLimit)?;
+    let minimum = config.server.max_connections as u64 + 1;
+    if soft_limit < minimum {
         return Err(RouterError::InsufficientFileLimit {
             max_connections: config.server.max_connections,
             soft_limit,
@@ -76,7 +62,7 @@ fn validate_file_limit(config: &Config) -> Result<(), RouterError> {
 }
 
 #[cfg(not(unix))]
-fn validate_file_limit(_config: &Config) -> Result<(), RouterError> {
+fn prepare_file_limit(_config: &Config) -> Result<(), RouterError> {
     Ok(())
 }
 

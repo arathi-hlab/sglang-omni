@@ -59,9 +59,9 @@ pub enum RouterError {
     /// The configured listener could not be bound.
     #[error("failed to bind the configured listener")]
     Bind(#[source] io::Error),
-    /// The process file-descriptor limit could not be inspected.
+    /// The process file-descriptor limit could not be raised or inspected.
     #[cfg(unix)]
-    #[error("failed to read the process RLIMIT_NOFILE soft limit")]
+    #[error("failed to prepare the process RLIMIT_NOFILE soft limit")]
     FileLimit(#[source] io::Error),
     /// The listener and configured accepted sockets cannot fit under RLIMIT_NOFILE.
     #[cfg(unix)]

@@ -93,6 +93,22 @@ impl ChildGuard {
         Self(child)
     }
 
+    fn spawn_with_soft_nofile(config: &PathBuf, soft_limit: u64) -> Self {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("ulimit -S -n \"$1\" && exec \"$2\" --config \"$3\"")
+            .arg("sh")
+            .arg(soft_limit.to_string())
+            .arg(env!("CARGO_BIN_EXE_sgl-omni-router"))
+            .arg(config)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn router with a low RLIMIT_NOFILE soft limit");
+        Self(child)
+    }
+
     fn id(&self) -> u32 {
         self.0.id()
     }
@@ -354,6 +370,25 @@ fn help_version_and_check_config_have_exact_process_outcomes() {
 }
 
 #[test]
+fn check_config_ignores_the_process_file_limit() {
+    let _process_guard = process_lock();
+    let directory = TestDir::new();
+    let config = directory.config(unused_address(), 1024, 1_000);
+    let checked = Command::new("sh")
+        .arg("-c")
+        .arg("ulimit -n \"$1\" && exec \"$2\" --config \"$3\" --check-config")
+        .arg("sh")
+        .arg("32")
+        .arg(env!("CARGO_BIN_EXE_sgl-omni-router"))
+        .arg(config)
+        .output()
+        .expect("check config with an impossible process file limit");
+
+    assert!(checked.status.success());
+    assert_eq!(checked.stdout, b"configuration valid\n");
+}
+
+#[test]
 fn invalid_connection_caps_fail_check_config_with_exit_two() {
     let _process_guard = process_lock();
     let directory = TestDir::new();
@@ -382,6 +417,19 @@ fn impossible_nofile_limit_fails_before_serving() {
     assert_eq!(child.wait(PROCESS_DEADLINE).code(), Some(1));
     TcpStream::connect_timeout(&address, Duration::from_millis(100))
         .expect_err("invalid file limit must fail before the service becomes live");
+}
+
+#[test]
+fn low_soft_nofile_limit_is_raised_before_serving() {
+    let _process_guard = process_lock();
+    let directory = TestDir::new();
+    let address = unused_address();
+    let config = directory.config(address, 128, 1_000);
+    let mut child = ChildGuard::spawn_with_soft_nofile(&config, 32);
+
+    wait_until_live(address, &mut child);
+    signal(child.id(), "-TERM");
+    assert_eq!(child.wait(PROCESS_DEADLINE).code(), Some(0));
 }
 
 #[test]
