@@ -40,28 +40,28 @@ pub enum RouterError {
     #[error(transparent)]
     Config(#[from] ConfigError),
     /// The validated log filter could not be reconstructed.
-    #[error("failed to construct the configured logging filter")]
+    #[error("failed to construct the configured logging filter: {source}")]
     LoggingFilter {
         /// Internal parser source, available to structured diagnostics.
         #[source]
         source: tracing_subscriber::filter::ParseError,
     },
     /// The process-global tracing subscriber was already initialized or failed.
-    #[error("failed to initialize structured diagnostics")]
+    #[error("failed to initialize structured diagnostics: {source}")]
     TracingInit {
         /// Internal initialization source.
         #[source]
         source: tracing_subscriber::util::TryInitError,
     },
     /// The bounded Tokio runtime could not be created.
-    #[error("failed to initialize the async runtime")]
+    #[error("failed to initialize the async runtime: {0}")]
     RuntimeBuild(#[source] io::Error),
     /// The configured listener could not be bound.
-    #[error("failed to bind the configured listener")]
+    #[error("failed to bind the configured listener: {0}")]
     Bind(#[source] io::Error),
     /// The process file-descriptor limit could not be raised or inspected.
     #[cfg(unix)]
-    #[error("failed to prepare the process RLIMIT_NOFILE soft limit")]
+    #[error("failed to prepare the process RLIMIT_NOFILE soft limit: {0}")]
     FileLimit(#[source] io::Error),
     /// The listener and configured accepted sockets cannot fit under RLIMIT_NOFILE.
     #[cfg(unix)]
@@ -75,10 +75,10 @@ pub enum RouterError {
         soft_limit: u64,
     },
     /// The HTTP server stopped without a shutdown request.
-    #[error("the local HTTP server stopped unexpectedly")]
+    #[error("the local HTTP server stopped unexpectedly: {0}")]
     Server(#[source] io::Error),
     /// A server task panicked or otherwise failed to join.
-    #[error("the local HTTP server task failed")]
+    #[error("the local HTTP server task failed: {0}")]
     ServerTask(#[source] tokio::task::JoinError),
     /// Graceful drain exceeded the configured monotonic deadline.
     #[error("graceful shutdown exceeded its configured deadline")]
@@ -93,7 +93,7 @@ pub enum RouterError {
     #[error("failed to notify the local HTTP server to drain")]
     ShutdownNotify,
     /// Signal observation could not be installed or completed.
-    #[error("failed to observe process termination signals")]
+    #[error("failed to observe process termination signals: {0}")]
     Signal(#[source] io::Error),
 }
 

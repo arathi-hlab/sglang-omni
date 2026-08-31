@@ -501,6 +501,15 @@ fn bind_failure_exits_one_without_disturbing_the_existing_listener() {
     let config = directory.config(address, 1024, 1_000);
     let mut child = ChildGuard::spawn(&config);
     assert_eq!(child.wait(PROCESS_DEADLINE).code(), Some(1));
+    let mut stderr = String::new();
+    child
+        .0
+        .stderr
+        .take()
+        .expect("bind failure stderr remains available")
+        .read_to_string(&mut stderr)
+        .expect("read bind failure diagnostic");
+    assert!(stderr.contains("Address already in use"));
     assert_eq!(
         occupied.local_addr().expect("existing listener remains"),
         address

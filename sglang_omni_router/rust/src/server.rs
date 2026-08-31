@@ -63,9 +63,10 @@ pub(crate) async fn serve(config: Config) -> Result<(), RouterError> {
         },
     };
 
-    if let Err(error) = lifecycle.enter_draining() {
+    if lifecycle.enter_draining().is_err() {
         abort_and_join(&mut server_task).await?;
-        return Err(error);
+        lifecycle.enter_failed()?;
+        return Err(RouterError::Lifecycle);
     }
     info!(state = "draining", reason = ?first_signal, "graceful shutdown started");
     if shutdown_sender.send(()).is_err() {
