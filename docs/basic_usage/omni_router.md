@@ -50,10 +50,13 @@ flowchart LR
   cargo --version
   ```
 
-- One or more model workers installed using the
-  [SGLang-Omni installation guide](../get_started/installation.md).
+- **SGLang-Omni**, installed using the
+  [installation guide](../get_started/installation.md), for running model
+  workers.
 
-The router manages traffic. It does not launch or supervise model workers.
+The Rust router is built from this repository as a separate binary. It routes
+requests to configured SGLang-Omni workers but does not install, launch, or
+supervise them.
 
 ### Rust Binary
 
