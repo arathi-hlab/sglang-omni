@@ -32,26 +32,47 @@ flowchart LR
     Operations[Metrics and diagnostics] --> Selection
 ```
 
-## Prerequisites
+## Installation
 
-- [Rustup](https://rustup.rs/)
-- One or more SGLang-Omni workers that expose the routes declared in the router
-  configuration
-- A trusted network between clients, the router, and workers, or an
-  authenticated TLS proxy in front of the router
+SGLang-Omni workers require a supported Linux NVIDIA/CUDA environment. Follow
+the [SGLang-Omni installation guide](../get_started/installation.md) on each
+worker host before starting the router. The router process does not use CUDA
+and can run in the same container or on a separate Linux host with network
+access to the workers.
 
-The router manages traffic. It does not launch or supervise model workers.
-
-## Build
-
-Run the following commands from `sglang_omni_router/rust/`:
+Install the system build tools. Run these commands as root in a Debian or
+Ubuntu container; prefix them with `sudo` on a host:
 
 ```console
+apt-get update
+apt-get install -y build-essential ca-certificates curl git
+```
+
+Install Rust with Rustup and verify the toolchain:
+
+```console
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+rustc --version
+cargo --version
+```
+
+Clone SGLang-Omni and build the optimized router binary:
+
+```console
+git clone https://github.com/sgl-project/sglang-omni.git
+cd sglang-omni/sglang_omni_router/rust
 cargo build --release --locked
 ./target/release/sgl-omni-router --version
 ```
 
-The optimized binary is written to `target/release/sgl-omni-router`.
+`rust-toolchain.toml` selects the supported Rust toolchain. The optimized
+binary is written to `target/release/sgl-omni-router`. The router uses Rustls
+and does not require Python, Python bindings, or system OpenSSL packages.
+
+The router manages traffic. It does not launch or supervise model workers.
+Deploy it on a trusted network between clients and workers or behind an
+authenticated TLS proxy.
 
 ## Quick Start
 
@@ -274,9 +295,9 @@ deadline aborts and joins remaining work and exits with failure.
 ## Security and Deployment
 
 The router uses one static manifest and one multi-threaded process. It supports
-numeric loopback and non-loopback listener addresses, Linux containers, macOS,
-and MPS data-parallel worker deployments without a Python control-plane/data-
-plane split.
+numeric loopback and non-loopback listener addresses, Linux hosts and
+containers, and MPS data-parallel worker deployments without a Python
+control-plane/data-plane split.
 
 The router does not implement client authentication or terminate TLS. Deploy it
 on a trusted network or behind an authenticated TLS proxy.
