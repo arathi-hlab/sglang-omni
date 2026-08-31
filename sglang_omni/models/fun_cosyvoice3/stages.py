@@ -11,6 +11,10 @@ from typing import Any, Sequence, cast
 import torch
 import torch.nn.functional as F
 
+from sglang_omni.models.fun_cosyvoice3.flow_estimator_trt import (
+    execute_flow_estimator,
+    is_flow_estimator_trt,
+)
 from sglang_omni.models.fun_cosyvoice3.payload_types import FunCosyVoice3State
 from sglang_omni.models.fun_cosyvoice3.request_builders import (
     cleanup_prepared_cosyvoice3_request,
@@ -208,8 +212,8 @@ def _solve_flow_euler(
         t_in[:] = t
         spks_in[:batch_size] = spks
         cond_in[:batch_size] = cond
-        derivative = decoder.forward_estimator(
-            x_in, mask_in, mu_in, t_in, spks_in, cond_in, streaming=False
+        derivative = _forward_flow_estimator(
+            decoder, x_in, mask_in, mu_in, t_in, spks_in, cond_in
         )
         conditional, unconditional = derivative[:batch_size], derivative[batch_size:]
         x = x + dt * (
@@ -264,6 +268,23 @@ def _generate_flow(flow: Any, packed: _PackedFlowBatch) -> torch.Tensor:
     return _solve_flow_euler(decoder, z, t_span, mu, mask, embedding, cond)
 
 
+def _forward_flow_estimator(
+    decoder: Any,
+    x: torch.Tensor,
+    mask: torch.Tensor,
+    mu: torch.Tensor,
+    t: torch.Tensor,
+    spks: torch.Tensor,
+    cond: torch.Tensor,
+) -> torch.Tensor:
+    # note (guozhihao-224): CosyVoice forward_estimator hardcodes TRT shapes to
+    # (2, 80, T). Packed Flow is CFG=2N, so TRT uses execute_flow_estimator.
+    estimator = decoder.estimator
+    if isinstance(estimator, torch.nn.Module):
+        return decoder.forward_estimator(x, mask, mu, t, spks, cond, streaming=False)
+    return execute_flow_estimator(estimator, x, mask, mu, t, spks, cond)
+
+
 class FunCosyVoice3Flow:
     """CosyVoice3 Flow with batch inference enabled as its default API."""
 
@@ -314,10 +335,54 @@ def store_state(payload: StagePayload, state: FunCosyVoice3State) -> StagePayloa
     return _store_pipeline_state(payload, state)
 
 
+def _attach_flow_estimator_trt(
+    flow: Any,
+    checkpoint_dir: str,
+    device: str,
+    *,
+    max_cfg_batch: int,
+) -> None:
+    from sglang_omni.models.fun_cosyvoice3.flow_estimator_trt import (
+        build_flow_estimator_trt,
+        resolve_flow_estimator_onnx,
+    )
+
+    # note (guozhihao-224): TensorRT is NVIDIA-only; NPU uses a separate graph path.
+    if str(device).split(":", 1)[0].lower() != "cuda":
+        raise RuntimeError(
+            "enable_flow_estimator_trt requires a CUDA vocoder device, "
+            f"got {device!r}"
+        )
+    if not current_platform.is_cuda() or not torch.cuda.is_available():
+        raise RuntimeError(
+            "enable_flow_estimator_trt requires NVIDIA CUDA, "
+            f"got platform {current_platform.device_type!r}"
+        )
+
+    onnx_path = resolve_flow_estimator_onnx(checkpoint_dir)
+    wrapper = build_flow_estimator_trt(
+        onnx_path,
+        device,
+        max_batch=max_cfg_batch,
+    )
+    # note (guozhihao-224): CosyVoice registers estimator as an nn.Module child;
+    # delete first so assigning the TRT wrapper does not raise TypeError.
+    del flow.decoder.estimator
+    flow.decoder.estimator = wrapper
+    logger.info(
+        "Fun-CosyVoice3 Flow DiT estimator is TensorRT (%s, max_cfg_batch=%d)",
+        onnx_path,
+        wrapper.max_batch,
+    )
+
+
 def _load_cosyvoice3_flow_hift(
     checkpoint_dir: str,
     device: str,
     fp16: bool = False,
+    *,
+    enable_flow_estimator_trt: bool = False,
+    trt_max_cfg_batch: int = 2,
 ) -> tuple[Any, Any]:
     try:
         from cosyvoice.cli.cosyvoice import CosyVoice3
@@ -330,12 +395,20 @@ def _load_cosyvoice3_flow_hift(
     flow.to(device).eval()
     hift.to(device).eval()
     del cv.model.llm
-    return FunCosyVoice3Flow(flow), hift
+    wrapped = FunCosyVoice3Flow(flow)
+    if enable_flow_estimator_trt:
+        _attach_flow_estimator_trt(
+            wrapped,
+            checkpoint_dir,
+            device,
+            max_cfg_batch=trt_max_cfg_batch,
+        )
+    return wrapped, hift
 
 
 def _configure_dit_torch_compile() -> None:
     """Enable the Inductor/Dynamo flags the DiT graph wants, without pulling in
-    the full ``sglang.srt`` stack (the vocoder is a plain pipeline process)."""
+    the full sglang.srt stack (the vocoder is a plain pipeline process)."""
     torch._inductor.config.fx_graph_cache = True
     if hasattr(torch._dynamo.config, "cache_size_limit"):
         torch._dynamo.config.cache_size_limit = 1024
@@ -469,10 +542,13 @@ class _CosyVoice3Vocoder(BatchVocoderBase):
     ) -> None:
         if flow_batch_bucket_frames <= 0:
             raise ValueError("flow_batch_bucket_frames must be greater than zero")
-        if not isinstance(flow.decoder.estimator, torch.nn.Module):
+        estimator = flow.decoder.estimator
+        if not isinstance(estimator, torch.nn.Module) and not is_flow_estimator_trt(
+            estimator
+        ):
             raise RuntimeError(
-                "Fun-CosyVoice3 requires the PyTorch Flow estimator from the pinned "
-                "CosyVoice commit; TensorRT Flow is not supported"
+                "Fun-CosyVoice3 Flow estimator must be a PyTorch module or a "
+                "TensorRT wrapper exposing acquire_estimator / execute"
             )
         self._flow = (
             flow if isinstance(flow, FunCosyVoice3Flow) else FunCosyVoice3Flow(flow)
@@ -623,9 +699,15 @@ def create_vocoder_executor(
     flow_batch_bucket_frames: int = 50,
     flow_batch_admission_frames: int = _DEFAULT_FLOW_BATCH_ADMISSION_FRAMES,
     enable_dit_torch_compile: bool = False,
+    enable_flow_estimator_trt: bool = False,
 ) -> SimpleScheduler:
     if flow_batch_admission_frames <= 0:
         raise ValueError("flow_batch_admission_frames must be greater than zero")
+    if enable_flow_estimator_trt and enable_dit_torch_compile:
+        raise ValueError(
+            "enable_flow_estimator_trt and enable_dit_torch_compile both "
+            "target flow.decoder.estimator; enable only one"
+        )
     device = resolve_device_spec(device, gpu_id)
     checkpoint_dir = resolve_checkpoint(model_path)
     if dtype not in _AUTOCAST_DTYPES:
@@ -634,10 +716,15 @@ def create_vocoder_executor(
             f"expected one of {sorted(_AUTOCAST_DTYPES)}"
         )
     compute_dtype = _AUTOCAST_DTYPES[dtype]
+    # note (guozhihao-224): packed Flow CFG batch is 2 * request_batch; size the
+    # engine to the scheduler max so a fitting ONNX can enqueue once.
+    trt_max_cfg_batch = max(2, 2 * int(max_batch_size))
     flow, hift = _load_cosyvoice3_flow_hift(
         checkpoint_dir,
         device=device,
         fp16=(dtype == "float16"),
+        enable_flow_estimator_trt=enable_flow_estimator_trt,
+        trt_max_cfg_batch=trt_max_cfg_batch,
     )
     if enable_dit_torch_compile:
         _compile_dit_backbone(flow, compute_dtype=compute_dtype)
