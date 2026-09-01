@@ -133,7 +133,7 @@ async fn run_worker_health(
             _ = ticker.tick() => {}
         }
 
-        let success = tokio::select! {
+        let response = tokio::select! {
             biased;
             changed = shutdown.changed() => {
                 match changed {
@@ -143,9 +143,12 @@ async fn run_worker_health(
                 }
             }
             result = client.get(record.target.health_url().clone()).send() => {
-                result.is_ok_and(|response| response.status().is_success())
+                result
             }
         };
+        let success = response
+            .as_ref()
+            .is_ok_and(|response| response.status().is_success());
         let previous = record.health.load();
         let next = tracker.observe(success);
         record.health.store(next);
@@ -155,6 +158,26 @@ async fn run_worker_health(
                 health = ?next,
                 "worker health changed"
             );
+        }
+
+        if let Ok(mut response) = response {
+            loop {
+                tokio::select! {
+                    biased;
+                    changed = shutdown.changed() => {
+                        match changed {
+                            Ok(()) if *shutdown.borrow() => return,
+                            Ok(()) => continue,
+                            Err(_) => return,
+                        }
+                    }
+                    chunk = response.chunk() => {
+                        if !matches!(chunk, Ok(Some(_))) {
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -200,7 +223,7 @@ impl ProbeTracker {
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use std::io::{Read, Write};
-    use std::net::{SocketAddr, TcpListener};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
     use std::thread;
@@ -253,6 +276,18 @@ mod tests {
             .expect("test health client must build")
     }
 
+    fn read_request_head(stream: &mut TcpStream) {
+        let mut request = Vec::with_capacity(256);
+        while !request.ends_with(b"\r\n\r\n") {
+            let mut byte = [0_u8];
+            stream
+                .read_exact(&mut byte)
+                .expect("read complete health request head");
+            request.push(byte[0]);
+            assert!(request.len() <= 8_192);
+        }
+    }
+
     #[test]
     fn hysteresis_preserves_unknown_and_requires_consecutive_observations() {
         let mut tracker = ProbeTracker::new(2, 3);
@@ -266,7 +301,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_only_probe_does_not_wait_for_or_buffer_a_large_body() {
+    async fn status_is_published_before_response_body_finishes() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind health fixture");
         let address = listener.local_addr().expect("read health fixture address");
         let server = thread::spawn(move || {
@@ -302,6 +337,55 @@ mod tests {
         supervisor.cancel();
         assert!(matches!(supervisor.join_next().await, Some(Ok(()))));
         server.join().expect("join health fixture server");
+    }
+
+    #[tokio::test]
+    async fn completed_health_bodies_allow_connection_reuse() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind reuse fixture");
+        let address = listener.local_addr().expect("read reuse fixture address");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = Arc::clone(&requests);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept health connection");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .expect("bound reused health connection");
+            for _ in 0..2 {
+                read_request_head(&mut stream);
+                server_requests.fetch_add(1, Ordering::AcqRel);
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .expect("write reused health response");
+            }
+        });
+        let record = test_record(0, address);
+        let client = test_client(std::slice::from_ref(&record), Duration::from_secs(1));
+        let mut supervisor = HealthSupervisor::start(
+            &[Arc::clone(&record)],
+            client,
+            Duration::from_secs(60),
+            1,
+            1,
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while record.health.load() != WorkerHealth::Healthy {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("initial health probe must complete");
+        record.immediate_probe.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while requests.load(Ordering::Acquire) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("second probe must reuse the health connection");
+
+        server.join().expect("join reuse fixture server");
+        supervisor.cancel();
+        assert!(matches!(supervisor.join_next().await, Some(Ok(()))));
     }
 
     #[tokio::test]
