@@ -267,11 +267,7 @@ fn set_text(slot: &mut Option<String>, value: &[u8]) -> Result<(), HttpFault> {
 }
 
 fn find(haystack: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
-    haystack
-        .get(start..)?
-        .windows(needle.len())
-        .position(|window| window == needle)
-        .map(|position| start + position)
+    memchr::memmem::find(haystack.get(start..)?, needle).map(|position| start + position)
 }
 
 fn is_token_byte(byte: u8) -> bool {
