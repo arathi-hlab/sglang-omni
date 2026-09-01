@@ -823,12 +823,24 @@ fn least_requests_prefers_the_less_occupied_replica() {
 
     let address = router.address;
     let slow = thread::spawn(move || post(address, b"slow", None));
-    first.wait_for_requests(1);
+    let deadline = Instant::now() + DEADLINE;
+    while first.captures().is_empty() && second.captures().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "neither worker received the slow request"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    let (occupied, available) = if first.captures().len() == 1 {
+        (&first, &second)
+    } else {
+        (&second, &first)
+    };
     assert_eq!(status(&post(router.address, b"{}", None)), 200);
     assert_eq!(status(&post(router.address, b"{}", None)), 200);
-    second.wait_for_requests(2);
-    assert_eq!(first.captures().len(), 1);
-    assert_eq!(second.captures().len(), 2);
+    available.wait_for_requests(2);
+    assert_eq!(occupied.captures().len(), 1);
+    assert_eq!(available.captures().len(), 2);
     assert_eq!(status(&slow.join().expect("join slow client")), 200);
 }
 

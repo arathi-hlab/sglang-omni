@@ -44,10 +44,6 @@ pub(super) struct WorkerRecord {
 }
 
 impl WorkerRecord {
-    fn occupancy_snapshot(&self) -> usize {
-        self.capacity.limit - self.capacity.semaphore.available_permits()
-    }
-
     fn is_routable(&self) -> bool {
         self.health.load() == WorkerHealth::Healthy
     }
@@ -205,54 +201,37 @@ impl WorkerPool {
         &self,
         matches: &impl Fn(&WorkerRecord) -> bool,
     ) -> Option<(Arc<WorkerRecord>, tokio::sync::OwnedSemaphorePermit)> {
-        let mut snapshots = [usize::MAX; MAX_WORKERS];
-        let mut attempted = [false; MAX_WORKERS];
-        let mut eligible_count = 0;
+        let mut minimum = usize::MAX;
+        let mut ties = [0; MAX_WORKERS];
+        let mut tie_count = 0;
         for record in &self.records {
+            if !matches(record) || !record.is_routable() {
+                continue;
+            }
+            let available = record.capacity.semaphore.available_permits();
+            if available == 0 {
+                continue;
+            }
             let index = record.registration_id.startup_ordinal();
-            if matches(record) && record.is_routable() {
-                snapshots[index] = record.occupancy_snapshot();
-                eligible_count += 1;
+            let occupancy = record.capacity.limit - available;
+            if occupancy < minimum {
+                minimum = occupancy;
+                ties[0] = index;
+                tie_count = 1;
+            } else if occupancy == minimum {
+                ties[tie_count] = index;
+                tie_count += 1;
             }
         }
-        let start = self.selector.start(eligible_count);
-        for _ in 0..eligible_count {
-            let mut best: Option<(usize, usize, usize)> = None;
-            let mut eligible_ordinal = 0;
-            for (index, occupancy) in snapshots
-                .iter()
-                .copied()
-                .enumerate()
-                .take(self.records.len())
-            {
-                if occupancy == usize::MAX {
-                    continue;
-                }
-                let ordinal = eligible_ordinal;
-                eligible_ordinal += 1;
-                if attempted[index] {
-                    continue;
-                }
-                let rank = if ordinal >= start {
-                    ordinal - start
-                } else {
-                    eligible_count - start + ordinal
-                };
-                let key = (occupancy, rank);
-                if best
-                    .is_none_or(|(_, best_occupancy, best_rank)| key < (best_occupancy, best_rank))
-                {
-                    best = Some((index, occupancy, rank));
-                }
-            }
-            let (index, _, _) = best?;
-            attempted[index] = true;
-            let record = &self.records[index];
-            if let Ok(exact) = Arc::clone(&record.capacity.semaphore).try_acquire_owned() {
-                return Some((Arc::clone(record), exact));
-            }
+        if tie_count == 0 {
+            return None;
         }
-        None
+        let index = ties[self.selector.start(tie_count)];
+        let record = &self.records[index];
+        let exact = Arc::clone(&record.capacity.semaphore)
+            .try_acquire_owned()
+            .ok()?;
+        Some((Arc::clone(record), exact))
     }
 
     pub(crate) fn content_blind_generation_http(
@@ -581,6 +560,57 @@ mod tests {
             drop(lease);
         }
         assert_eq!(selected, [1, 3, 1, 3, 1, 3]);
+    }
+
+    #[test]
+    fn least_requests_rotates_only_over_the_minimum_occupancy_tie() {
+        let records = vec![
+            record(0, "local", "omni", 2),
+            record(1, "local", "omni", 2),
+            record(2, "local", "omni", 2),
+        ];
+        let _middle = Arc::clone(&records[1].capacity.semaphore)
+            .try_acquire_owned()
+            .expect("occupy middle worker");
+        let pool = pool(RoutingStrategy::LeastRequests, records, 8);
+        let trust = TrustDomain::new(String::from("local"));
+        let mut selected = Vec::new();
+        for _ in 0..6 {
+            let lease = pool
+                .content_blind_generation_http(&trust)
+                .expect("homogeneous cohort")
+                .dispatch(pool.try_admit().expect("admit tied least requests"))
+                .expect("dispatch tied least requests");
+            selected.push(lease.registration_ordinal());
+            drop(lease);
+        }
+        assert_eq!(selected, [0, 2, 0, 2, 0, 2]);
+    }
+
+    #[test]
+    fn least_requests_skips_full_workers_in_one_selection_pass() {
+        let records = (0..MAX_WORKERS)
+            .map(|ordinal| record(ordinal, "local", "omni", 1))
+            .collect::<Vec<_>>();
+        let held = records[..MAX_WORKERS - 1]
+            .iter()
+            .map(|record| {
+                Arc::clone(&record.capacity.semaphore)
+                    .try_acquire_owned()
+                    .expect("fill worker")
+            })
+            .collect::<Vec<_>>();
+        let pool = pool(RoutingStrategy::LeastRequests, records, 1);
+        let trust = TrustDomain::new(String::from("local"));
+        let lease = pool
+            .content_blind_generation_http(&trust)
+            .expect("homogeneous cohort")
+            .dispatch(pool.try_admit().expect("admit with full workers"))
+            .expect("dispatch to available worker");
+
+        assert_eq!(lease.registration_ordinal(), MAX_WORKERS - 1);
+        drop(lease);
+        drop(held);
     }
 
     #[test]
