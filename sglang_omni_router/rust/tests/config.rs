@@ -342,6 +342,10 @@ fn worker_origins_and_static_pins_are_strict() {
             "base_url = \"http://127.0.0.1:8000/\"",
             "base_url = \"http://127.0.0.1:8000/\"\nresolved_ip = \"127.0.0.2\"",
         ),
+        base.replace(
+            "base_url = \"http://127.0.0.1:8000/\"",
+            "base_url = \"http://127.0.0.1:0/\"",
+        ),
     ];
     for contents in invalid {
         let error = load_bytes(contents.as_bytes()).expect_err("invalid worker target must fail");

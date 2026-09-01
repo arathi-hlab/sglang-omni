@@ -57,6 +57,7 @@ impl ResolvedTarget {
             || base_url.query().is_some()
             || base_url.fragment().is_some()
             || base_url.path() != "/"
+            || base_url.port() == Some(0)
         {
             return None;
         }
