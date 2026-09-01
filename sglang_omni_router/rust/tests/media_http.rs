@@ -588,12 +588,11 @@ fn relays_all_media_routes_with_exact_bytes_headers_and_large_direct_uploads() {
     )
     .into_bytes();
     let prior = worker.captures().len();
-    let response = request(
+    let response = expect_rejected_request(
         router.address,
-        "POST",
         "/v1/audio/speech/batch",
-        Some("application/json"),
-        &large_batch,
+        "application/json",
+        large_batch.len(),
     )
     .expect("oversized batch response");
     assert!(response.starts_with(b"HTTP/1.1 413"));
@@ -993,6 +992,25 @@ fn request_with_extra_headers(
     );
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    Ok(response)
+}
+
+fn expect_rejected_request(
+    address: SocketAddr,
+    path: &str,
+    content_type: &str,
+    content_length: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(200))?;
+    stream.set_read_timeout(Some(DEADLINE))?;
+    stream.set_write_timeout(Some(DEADLINE))?;
+    write!(
+        stream,
+        "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n"
+    )?;
+    stream.flush()?;
     let mut response = Vec::new();
     stream.read_to_end(&mut response)?;
     Ok(response)
