@@ -1,3 +1,4 @@
+mod headers;
 mod request_body;
 mod response_body;
 
@@ -19,6 +20,10 @@ use crate::worker_pool::{AdmissionError, DispatchError, RequestLease};
 use request_body::{BufferedBody, DirectRequestBody};
 pub(crate) use request_body::{SharedUploadState, UploadState};
 use response_body::DirectResponseBody;
+
+pub(crate) use headers::{
+    copy_one, is_request_media_type, parse_content_length, sanitize_response_headers,
+};
 
 pub(crate) struct HttpRelay {
     client: reqwest::Client,

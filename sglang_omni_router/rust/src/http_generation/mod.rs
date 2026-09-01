@@ -15,9 +15,6 @@ use crate::worker_pool::{CapacityClass, TrustDomain, WorkerPool};
 
 use classify::classify;
 use headers::{canonical_content_type, sanitize_response, validate_request};
-pub(crate) use headers::{
-    connection_tokens, is_request_media_type, parse_content_length, valid_generic_content_type,
-};
 
 pub(crate) const CHAT_PATH: &str = "/v1/chat/completions";
 

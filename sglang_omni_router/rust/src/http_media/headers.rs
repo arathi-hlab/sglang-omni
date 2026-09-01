@@ -1,13 +1,10 @@
 use axum::http::header::{
-    CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, EXPECT,
-    EXPIRES, HeaderName, HeaderValue, TRAILER, TRANSFER_ENCODING, VARY,
+    CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, EXPECT, HeaderValue, TRAILER, TRANSFER_ENCODING,
 };
 use axum::http::{HeaderMap, StatusCode};
 
 use crate::error::HttpFault;
-use crate::http_generation::{
-    connection_tokens, is_request_media_type, parse_content_length, valid_generic_content_type,
-};
+use crate::http_relay::{is_request_media_type, parse_content_length, sanitize_response_headers};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RequestKind {
@@ -141,168 +138,9 @@ fn one_route_header<'a>(
 pub(super) fn sanitize_response(
     status: StatusCode,
     source: &HeaderMap,
-    profile: SuccessProfile,
+    _profile: SuccessProfile,
 ) -> Result<HeaderMap, HttpFault> {
-    let connection = connection_tokens(source)?;
-    let mut preserve_pcm_metadata = false;
-    if !(status.is_success() || status.is_client_error() || status.is_server_error()) {
-        return Err(HttpFault::UpstreamProtocolError);
-    }
-    if source.contains_key(CONTENT_ENCODING) && connection.contains(CONTENT_ENCODING.as_str()) {
-        return Err(HttpFault::UpstreamProtocolError);
-    }
-    let mut types = source.get_all(CONTENT_TYPE).iter();
-    let content_type = types.next();
-    let mut lengths = source.get_all(CONTENT_LENGTH).iter();
-    let content_length = lengths.next();
-    if types.next().is_some() || lengths.next().is_some() {
-        return Err(HttpFault::UpstreamProtocolError);
-    }
-    if let Some(value) = content_type
-        && !value.to_str().is_ok_and(valid_generic_content_type)
-    {
-        return Err(HttpFault::UpstreamProtocolError);
-    }
-    if let Some(value) = content_length
-        && parse_content_length(value).is_none()
-    {
-        return Err(HttpFault::UpstreamProtocolError);
-    }
-    if status.is_success() {
-        let content_type = content_type
-            .filter(|_| !connection.contains(CONTENT_TYPE.as_str()))
-            .and_then(|value| value.to_str().ok())
-            .ok_or(HttpFault::UpstreamProtocolError)?;
-        if !valid_success_type(content_type, profile) {
-            return Err(HttpFault::UpstreamProtocolError);
-        }
-        if profile == SuccessProfile::Speech && is_pcm(content_type) {
-            preserve_pcm_metadata = validate_pcm_metadata(source, &connection)?;
-        }
-    }
-
-    let mut result = HeaderMap::new();
-    copy_one(source, &connection, &mut result, CONTENT_TYPE);
-    copy_one(source, &connection, &mut result, CONTENT_LENGTH);
-    for name in [CONTENT_ENCODING, CACHE_CONTROL, EXPIRES, VARY] {
-        copy_all(source, &connection, &mut result, name);
-    }
-    match profile {
-        SuccessProfile::Speech => {
-            for name in [
-                CONTENT_DISPOSITION,
-                HeaderName::from_static("x-prompt-tokens"),
-                HeaderName::from_static("x-completion-tokens"),
-                HeaderName::from_static("x-engine-time"),
-                HeaderName::from_static("x-finish-reason"),
-            ] {
-                copy_one(source, &connection, &mut result, name);
-            }
-            if preserve_pcm_metadata {
-                for name in [
-                    HeaderName::from_static("x-sample-rate"),
-                    HeaderName::from_static("x-channels"),
-                    HeaderName::from_static("x-bit-depth"),
-                ] {
-                    copy_one(source, &connection, &mut result, name);
-                }
-            }
-        }
-        SuccessProfile::SpeechBatch | SuccessProfile::Transcription => {}
-    }
-    Ok(result)
-}
-
-fn valid_success_type(value: &str, profile: SuccessProfile) -> bool {
-    let media = value.split(';').next().map(str::trim).unwrap_or_default();
-    match profile {
-        SuccessProfile::Speech => [
-            "audio/mpeg",
-            "audio/opus",
-            "audio/aac",
-            "audio/flac",
-            "audio/wav",
-            "audio/pcm",
-        ]
-        .iter()
-        .any(|expected| media.eq_ignore_ascii_case(expected)),
-        SuccessProfile::SpeechBatch => media.eq_ignore_ascii_case("application/json"),
-        SuccessProfile::Transcription => {
-            media.eq_ignore_ascii_case("application/json")
-                || media.eq_ignore_ascii_case("text/plain")
-                || media.eq_ignore_ascii_case("text/event-stream")
-        }
-    }
-}
-
-fn is_pcm(content_type: &str) -> bool {
-    content_type
-        .split(';')
-        .next()
-        .is_some_and(|media| media.trim().eq_ignore_ascii_case("audio/pcm"))
-}
-
-fn validate_pcm_metadata(
-    source: &HeaderMap,
-    connection: &std::collections::HashSet<String>,
-) -> Result<bool, HttpFault> {
-    let names = [
-        HeaderName::from_static("x-sample-rate"),
-        HeaderName::from_static("x-channels"),
-        HeaderName::from_static("x-bit-depth"),
-    ];
-    let any_present = names.iter().any(|name| source.contains_key(name));
-    if !any_present {
-        return Ok(false);
-    }
-    for name in names {
-        if connection.contains(name.as_str()) {
-            return Err(HttpFault::UpstreamProtocolError);
-        }
-        let values = source.get_all(&name);
-        let mut values = values.iter();
-        let value = values.next().ok_or(HttpFault::UpstreamProtocolError)?;
-        if values.next().is_some() {
-            return Err(HttpFault::UpstreamProtocolError);
-        }
-        let value = value
-            .to_str()
-            .map_err(|_| HttpFault::UpstreamProtocolError)?;
-        if value.is_empty()
-            || !value.bytes().all(|byte| byte.is_ascii_digit())
-            || !value.parse::<u64>().is_ok_and(|value| value > 0)
-        {
-            return Err(HttpFault::UpstreamProtocolError);
-        }
-    }
-    Ok(true)
-}
-
-fn copy_one(
-    source: &HeaderMap,
-    connection: &std::collections::HashSet<String>,
-    destination: &mut HeaderMap,
-    name: HeaderName,
-) {
-    if !connection.contains(name.as_str())
-        && let Some(value) = source.get(&name)
-    {
-        destination.insert(name, value.clone());
-    }
-}
-
-fn copy_all(
-    source: &HeaderMap,
-    connection: &std::collections::HashSet<String>,
-    destination: &mut HeaderMap,
-    name: HeaderName,
-) {
-    if connection.contains(name.as_str()) {
-        return;
-    }
-    for value in source.get_all(&name) {
-        destination.append(name.clone(), value.clone());
-    }
+    sanitize_response_headers(status, source)
 }
 
 fn multipart_boundary(value: &str) -> Option<String> {
