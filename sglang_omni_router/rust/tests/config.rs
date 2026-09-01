@@ -103,6 +103,15 @@ fn omitted_server_limits_use_bounded_defaults() {
 }
 
 #[test]
+fn shipped_examples_match_the_strict_schema() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for name in ["omni.toml", "tts.toml", "asr.toml"] {
+        let path = root.join("examples").join(name);
+        Config::load(&path).unwrap_or_else(|error| panic!("{name} must load: {error}"));
+    }
+}
+
+#[test]
 fn compact_logging_format_selects_compact_output() {
     let config = valid_config("127.0.0.1:30000", 30_000, "info")
         .replace("format = \"json\"", "format = \"compact\"");

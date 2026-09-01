@@ -698,6 +698,56 @@ fn oversized_heterogeneous_request_is_rejected_without_upstream_send() {
 }
 
 #[test]
+fn media_accepts_chunked_uploads_and_standard_continue() {
+    let _guard = socket_guard();
+    let first = Worker::start();
+    let second = Worker::start();
+    let router = RouterProcess::start(&[MediaRoute::Speech], &[(&first, false), (&second, true)]);
+    let body = br#"{"model":"tts","input":"chunked","response_format":"wav"}"#;
+    let response = chunked_request(
+        router.address,
+        "/v1/audio/speech",
+        "application/json",
+        &[&body[..17], &body[17..]],
+    )
+    .expect("chunked media response");
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    assert!(
+        first
+            .captures()
+            .into_iter()
+            .chain(second.captures())
+            .any(|capture| capture.body == body)
+    );
+
+    let mut stream = TcpStream::connect_timeout(&router.address, Duration::from_millis(200))
+        .expect("connect continue client");
+    stream
+        .set_read_timeout(Some(DEADLINE))
+        .expect("bound continue read");
+    stream
+        .set_write_timeout(Some(DEADLINE))
+        .expect("bound continue write");
+    write!(
+        stream,
+        "POST /v1/audio/speech HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
+        router.address,
+        body.len()
+    )
+    .expect("write continue request head");
+    stream.flush().expect("flush continue request head");
+    let (head, pending) = read_head(&mut stream).expect("read continue response");
+    assert!(head.starts_with("HTTP/1.1 100 Continue"));
+    assert!(pending.is_empty());
+    stream.write_all(body).expect("write continued body");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .expect("read final response");
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+}
+
+#[test]
 fn homogeneous_media_round_robin_reaches_both_workers_over_real_sockets() {
     let _guard = socket_guard();
     let first = Worker::start();
@@ -922,6 +972,30 @@ fn request_with_extra_headers(
     );
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    Ok(response)
+}
+
+fn chunked_request(
+    address: SocketAddr,
+    path: &str,
+    content_type: &str,
+    chunks: &[&[u8]],
+) -> std::io::Result<Vec<u8>> {
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(200))?;
+    stream.set_read_timeout(Some(DEADLINE))?;
+    stream.set_write_timeout(Some(DEADLINE))?;
+    write!(
+        stream,
+        "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+    )?;
+    for chunk in chunks {
+        write!(stream, "{:X}\r\n", chunk.len())?;
+        stream.write_all(chunk)?;
+        stream.write_all(b"\r\n")?;
+    }
+    stream.write_all(b"0\r\n\r\n")?;
     let mut response = Vec::new();
     stream.read_to_end(&mut response)?;
     Ok(response)
