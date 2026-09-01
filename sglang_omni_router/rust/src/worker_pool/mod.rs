@@ -24,9 +24,7 @@ pub(crate) use resolver::ResolvedTarget;
 
 use admission::AdmissionController;
 use health::AtomicHealth;
-use profile::{
-    MAX_WORKERS, RegistrationId, ServiceProfile, WorkerId, generation_cohort_is_homogeneous,
-};
+use profile::{MAX_WORKERS, RegistrationId, ServiceProfile, WorkerId};
 use resolver::{build_health_client, build_http_client};
 use selection::{Selector, SelectorGuard};
 
@@ -81,8 +79,7 @@ pub(crate) struct WorkerPool {
     homogeneous_generation_http: Vec<HomogeneousGenerationCohort>,
     homogeneous_media_http: Vec<HomogeneousMediaCohort>,
     health_client: reqwest::Client,
-    generation_client: Option<reqwest::Client>,
-    media_client: Option<reqwest::Client>,
+    http_client: reqwest::Client,
 }
 
 struct HomogeneousGenerationCohort {
@@ -123,30 +120,12 @@ impl WorkerPool {
             .ok_or(crate::error::RouterError::WorkerPoolInvariant)?;
         let health_client = build_health_client(config.health.timeout(), config.health.interval())
             .map_err(crate::error::RouterError::HealthClient)?;
-        let generation_client = config
-            .http_generation
-            .as_ref()
-            .map(|generation| {
-                build_http_client(
-                    generation.connect_timeout(),
-                    generation.pool_idle_timeout(),
-                    generation.pool_max_idle_per_host,
-                )
-            })
-            .transpose()
-            .map_err(crate::error::RouterError::GenerationClient)?;
-        let media_client = config
-            .http_media
-            .as_ref()
-            .map(|media| {
-                build_http_client(
-                    media.connect_timeout(),
-                    media.pool_idle_timeout(),
-                    media.pool_max_idle_per_host,
-                )
-            })
-            .transpose()
-            .map_err(crate::error::RouterError::MediaClient)?;
+        let http_client = build_http_client(
+            config.http.connect_timeout(),
+            config.http.pool_idle_timeout(),
+            config.http.pool_max_idle_per_host,
+        )
+        .map_err(crate::error::RouterError::HttpClient)?;
         let admission_limit = |limit: Option<u32>| {
             limit
                 .map(usize::try_from)
@@ -187,8 +166,7 @@ impl WorkerPool {
             homogeneous_generation_http,
             homogeneous_media_http,
             health_client,
-            generation_client,
-            media_client,
+            http_client,
         })
     }
 
@@ -202,12 +180,8 @@ impl WorkerPool {
         )
     }
 
-    pub(crate) fn generation_client(&self) -> Option<reqwest::Client> {
-        self.generation_client.clone()
-    }
-
-    pub(crate) fn media_client(&self) -> Option<reqwest::Client> {
-        self.media_client.clone()
+    pub(crate) fn http_client(&self) -> reqwest::Client {
+        self.http_client.clone()
     }
 
     pub(crate) fn try_admit(
@@ -423,38 +397,32 @@ fn candidate_set(indices: &[usize]) -> [bool; MAX_WORKERS] {
 
 impl ContentBlindGenerationHttp<'_> {
     pub(crate) fn dispatch(self, admission: AdmissionLease) -> Result<RequestLease, DispatchError> {
-        self.pool.dispatch_matching(
-            admission,
-            true,
-            |record| {
-                &record.trust_domain == self.trust
-                    && record
-                        .profiles
-                        .iter()
-                        .any(|profile| profile.service_class() == ServiceClass::GenerationHttp)
-            },
-        )
+        self.pool.dispatch_matching(admission, true, |record| {
+            &record.trust_domain == self.trust
+                && record
+                    .profiles
+                    .iter()
+                    .any(|profile| profile.service_class() == ServiceClass::GenerationHttp)
+        })
     }
 }
 
 impl ContentBlindMediaHttp<'_> {
     pub(crate) fn dispatch(self, admission: AdmissionLease) -> Result<RequestLease, DispatchError> {
-        self.pool
-            .dispatch_matching(admission, true, |record| {
-                record.trust_domain == self.cohort.trust_domain
-                    && record.profiles.iter().any(|profile| {
-                        profile.service_class() == self.cohort.service
-                            && match (profile, self.cohort.task) {
-                                (
-                                    ServiceProfile::TranscriptionHttp { task, .. },
-                                    Some(required),
-                                ) => *task == required,
-                                (ServiceProfile::TranscriptionHttp { .. }, None) => false,
-                                (_, None) => true,
-                                (_, Some(_)) => false,
+        self.pool.dispatch_matching(admission, true, |record| {
+            record.trust_domain == self.cohort.trust_domain
+                && record.profiles.iter().any(|profile| {
+                    profile.service_class() == self.cohort.service
+                        && match (profile, self.cohort.task) {
+                            (ServiceProfile::TranscriptionHttp { task, .. }, Some(required)) => {
+                                *task == required
                             }
-                    })
-            })
+                            (ServiceProfile::TranscriptionHttp { .. }, None) => false,
+                            (_, None) => true,
+                            (_, Some(_)) => false,
+                        }
+                })
+        })
     }
 }
 
@@ -668,8 +636,7 @@ mod tests {
             admission: AdmissionController::new(admission, [Some(admission), None, None, None]),
             selector,
             health_client: client.clone(),
-            generation_client: Some(client),
-            media_client: None,
+            http_client: client,
         }
     }
 
@@ -1088,10 +1055,7 @@ mod tests {
         drop(lease);
     }
 
-    fn media_record(
-        ordinal: usize,
-        profile: ServiceProfile,
-    ) -> Arc<WorkerRecord> {
+    fn media_record(ordinal: usize, profile: ServiceProfile) -> Arc<WorkerRecord> {
         let health = AtomicHealth::unknown();
         health.store(WorkerHealth::Healthy);
         Arc::new(WorkerRecord {
@@ -1124,8 +1088,7 @@ mod tests {
             admission: AdmissionController::new(8, [Some(8), Some(8), Some(8), Some(8)]),
             selector: Selector::new(RoutingStrategy::RoundRobin),
             health_client: client.clone(),
-            generation_client: None,
-            media_client: Some(client),
+            http_client: client,
         }
     }
 

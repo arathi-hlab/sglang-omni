@@ -37,6 +37,8 @@ pub struct Config {
     pub(crate) router: RouterConfig,
     pub(crate) admission: AdmissionConfig,
     pub(crate) health: HealthConfig,
+    #[serde(default)]
+    pub(crate) http: HttpConfig,
     pub(crate) http_generation: Option<HttpGenerationConfig>,
     pub(crate) http_media: Option<HttpMediaConfig>,
     pub(crate) workers: Vec<WorkerConfig>,
@@ -44,47 +46,27 @@ pub struct Config {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct HttpMediaConfig {
-    pub(crate) routes: Vec<HttpMediaRoute>,
-    pub(crate) trust_domain: String,
-    pub(crate) buffered_request_max_bytes: u64,
+pub(crate) struct HttpConfig {
     pub(crate) buffered_request_total_bytes: u64,
-    pub(crate) streamed_request_max_bytes: u64,
     connect_timeout_ms: u64,
-    request_timeout_ms: u64,
-    response_idle_timeout_ms: Option<u64>,
     pool_idle_timeout_ms: u64,
     pub(crate) pool_max_idle_per_host: usize,
 }
 
-impl Default for HttpMediaConfig {
+impl Default for HttpConfig {
     fn default() -> Self {
         Self {
-            routes: Vec::new(),
-            trust_domain: String::from("local"),
-            buffered_request_max_bytes: DEFAULT_BUFFERED_REQUEST_MAX_BYTES,
             buffered_request_total_bytes: DEFAULT_BUFFERED_REQUEST_TOTAL_BYTES,
-            streamed_request_max_bytes: DEFAULT_STREAMED_REQUEST_MAX_BYTES,
             connect_timeout_ms: DEFAULT_CONNECT_TIMEOUT_MS,
-            request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
-            response_idle_timeout_ms: None,
             pool_idle_timeout_ms: DEFAULT_POOL_IDLE_TIMEOUT_MS,
             pool_max_idle_per_host: DEFAULT_POOL_MAX_IDLE_PER_HOST,
         }
     }
 }
 
-impl HttpMediaConfig {
+impl HttpConfig {
     pub(crate) const fn connect_timeout(&self) -> Duration {
         Duration::from_millis(self.connect_timeout_ms)
-    }
-
-    pub(crate) const fn request_timeout(&self) -> Duration {
-        Duration::from_millis(self.request_timeout_ms)
-    }
-
-    pub(crate) fn response_idle_timeout(&self) -> Option<Duration> {
-        self.response_idle_timeout_ms.map(Duration::from_millis)
     }
 
     pub(crate) const fn pool_idle_timeout(&self) -> Duration {
@@ -94,7 +76,44 @@ impl HttpMediaConfig {
     pub(crate) fn buffered_total_usize(&self) -> Result<usize, ConfigError> {
         usize::try_from(self.buffered_request_total_bytes).map_err(|_| {
             ConfigError::invalid(
-                "http_media.buffered_request_total_bytes",
+                "http.buffered_request_total_bytes",
+                "cannot be represented on this platform",
+            )
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct HttpMediaConfig {
+    pub(crate) routes: Vec<HttpMediaRoute>,
+    pub(crate) trust_domain: String,
+    pub(crate) buffered_request_max_bytes: u64,
+    pub(crate) streamed_request_max_bytes: u64,
+    request_timeout_ms: u64,
+}
+
+impl Default for HttpMediaConfig {
+    fn default() -> Self {
+        Self {
+            routes: Vec::new(),
+            trust_domain: String::from("local"),
+            buffered_request_max_bytes: DEFAULT_BUFFERED_REQUEST_MAX_BYTES,
+            streamed_request_max_bytes: DEFAULT_STREAMED_REQUEST_MAX_BYTES,
+            request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
+        }
+    }
+}
+
+impl HttpMediaConfig {
+    pub(crate) const fn request_timeout(&self) -> Duration {
+        Duration::from_millis(self.request_timeout_ms)
+    }
+
+    pub(crate) fn buffered_max_usize(&self) -> Result<usize, ConfigError> {
+        usize::try_from(self.buffered_request_max_bytes).map_err(|_| {
+            ConfigError::invalid(
+                "http_media.buffered_request_max_bytes",
                 "cannot be represented on this platform",
             )
         })
@@ -154,12 +173,8 @@ impl HttpMediaRoute {
 pub(crate) struct HttpGenerationConfig {
     pub(crate) trust_domain: String,
     pub(crate) buffered_request_max_bytes: u64,
-    pub(crate) buffered_request_total_bytes: u64,
     pub(crate) streamed_request_max_bytes: u64,
-    connect_timeout_ms: u64,
     request_timeout_ms: u64,
-    pool_idle_timeout_ms: u64,
-    pub(crate) pool_max_idle_per_host: usize,
 }
 
 impl Default for HttpGenerationConfig {
@@ -167,42 +182,21 @@ impl Default for HttpGenerationConfig {
         Self {
             trust_domain: String::from("local"),
             buffered_request_max_bytes: DEFAULT_BUFFERED_REQUEST_MAX_BYTES,
-            buffered_request_total_bytes: DEFAULT_BUFFERED_REQUEST_TOTAL_BYTES,
             streamed_request_max_bytes: DEFAULT_STREAMED_REQUEST_MAX_BYTES,
-            connect_timeout_ms: DEFAULT_CONNECT_TIMEOUT_MS,
             request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
-            pool_idle_timeout_ms: DEFAULT_POOL_IDLE_TIMEOUT_MS,
-            pool_max_idle_per_host: DEFAULT_POOL_MAX_IDLE_PER_HOST,
         }
     }
 }
 
 impl HttpGenerationConfig {
-    pub(crate) const fn connect_timeout(&self) -> Duration {
-        Duration::from_millis(self.connect_timeout_ms)
-    }
-
     pub(crate) const fn request_timeout(&self) -> Duration {
         Duration::from_millis(self.request_timeout_ms)
-    }
-
-    pub(crate) const fn pool_idle_timeout(&self) -> Duration {
-        Duration::from_millis(self.pool_idle_timeout_ms)
     }
 
     pub(crate) fn buffered_max_usize(&self) -> Result<usize, ConfigError> {
         usize::try_from(self.buffered_request_max_bytes).map_err(|_| {
             ConfigError::invalid(
                 "http_generation.buffered_request_max_bytes",
-                "cannot be represented on this platform",
-            )
-        })
-    }
-
-    pub(crate) fn buffered_total_usize(&self) -> Result<usize, ConfigError> {
-        usize::try_from(self.buffered_request_total_bytes).map_err(|_| {
-            ConfigError::invalid(
-                "http_generation.buffered_request_total_bytes",
                 "cannot be represented on this platform",
             )
         })
@@ -415,9 +409,59 @@ impl Config {
                 "must configure generation or at least one media HTTP route",
             ));
         }
+        self.validate_http()?;
         self.validate_http_generation()?;
         self.validate_http_media()?;
         self.validate_speech_batch_admission()?;
+        Ok(())
+    }
+
+    fn validate_http(&self) -> Result<(), ConfigError> {
+        let largest_buffered_request = self
+            .http_generation
+            .as_ref()
+            .map(|config| config.buffered_request_max_bytes)
+            .into_iter()
+            .chain(
+                self.http_media
+                    .as_ref()
+                    .map(|config| config.buffered_request_max_bytes),
+            )
+            .max()
+            .unwrap_or(0);
+        if self.http.buffered_request_total_bytes < largest_buffered_request
+            || self.http.buffered_request_total_bytes > 2_147_483_647
+        {
+            return Err(ConfigError::invalid(
+                "http.buffered_request_total_bytes",
+                "must cover every per-request buffer and be at most 2147483647",
+            ));
+        }
+        let buffered_total = self.http.buffered_total_usize()?;
+        if buffered_total > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(ConfigError::invalid(
+                "http.buffered_request_total_bytes",
+                "exceeds the platform semaphore permit limit",
+            ));
+        }
+        if !(1..=60_000).contains(&self.http.connect_timeout_ms) {
+            return Err(ConfigError::invalid(
+                "http.connect_timeout_ms",
+                "must be between 1 and 60000",
+            ));
+        }
+        if !(1_000..=300_000).contains(&self.http.pool_idle_timeout_ms) {
+            return Err(ConfigError::invalid(
+                "http.pool_idle_timeout_ms",
+                "must be between 1000 and 300000",
+            ));
+        }
+        if !(1..=1_024).contains(&self.http.pool_max_idle_per_host) {
+            return Err(ConfigError::invalid(
+                "http.pool_max_idle_per_host",
+                "must be between 1 and 1024",
+            ));
+        }
         Ok(())
     }
 
@@ -444,21 +488,7 @@ impl Config {
                 "must be between 1 and 67108864",
             ));
         }
-        if media.buffered_request_total_bytes < media.buffered_request_max_bytes
-            || media.buffered_request_total_bytes > 2_147_483_647
-        {
-            return Err(ConfigError::invalid(
-                "http_media.buffered_request_total_bytes",
-                "must be at least the per-request limit and at most 2147483647",
-            ));
-        }
-        let buffered_total = media.buffered_total_usize()?;
-        if buffered_total > tokio::sync::Semaphore::MAX_PERMITS {
-            return Err(ConfigError::invalid(
-                "http_media.buffered_request_total_bytes",
-                "exceeds the platform semaphore permit limit",
-            ));
-        }
+        let _buffered_max = media.buffered_max_usize()?;
         if media.streamed_request_max_bytes < media.buffered_request_max_bytes
             || media.streamed_request_max_bytes > 4_294_967_296
         {
@@ -467,41 +497,12 @@ impl Config {
                 "must be at least the buffered limit and at most 4294967296",
             ));
         }
-        if !(1..=60_000).contains(&media.connect_timeout_ms) {
-            return Err(ConfigError::invalid(
-                "http_media.connect_timeout_ms",
-                "must be between 1 and 60000",
-            ));
-        }
-        if media.request_timeout_ms < media.connect_timeout_ms
+        if media.request_timeout_ms < self.http.connect_timeout_ms
             || media.request_timeout_ms > 3_600_000
         {
             return Err(ConfigError::invalid(
                 "http_media.request_timeout_ms",
-                "must be at least connect_timeout_ms and at most 3600000",
-            ));
-        }
-        if media.response_idle_timeout_ms.is_some_and(|timeout| {
-            timeout == 0
-                || tokio::time::Instant::now()
-                    .checked_add(Duration::from_millis(timeout))
-                    .is_none()
-        }) {
-            return Err(ConfigError::invalid(
-                "http_media.response_idle_timeout_ms",
-                "must be greater than zero and representable by the monotonic clock",
-            ));
-        }
-        if !(1_000..=300_000).contains(&media.pool_idle_timeout_ms) {
-            return Err(ConfigError::invalid(
-                "http_media.pool_idle_timeout_ms",
-                "must be between 1000 and 300000",
-            ));
-        }
-        if !(1..=1_024).contains(&media.pool_max_idle_per_host) {
-            return Err(ConfigError::invalid(
-                "http_media.pool_max_idle_per_host",
-                "must be between 1 and 1024",
+                "must be at least http.connect_timeout_ms and at most 3600000",
             ));
         }
         for route in &media.routes {
@@ -572,22 +573,7 @@ impl Config {
                 "must be between 1 and 67108864",
             ));
         }
-        if generation.buffered_request_total_bytes < generation.buffered_request_max_bytes
-            || generation.buffered_request_total_bytes > 2_147_483_647
-        {
-            return Err(ConfigError::invalid(
-                "http_generation.buffered_request_total_bytes",
-                "must be at least the per-request limit and at most 2147483647",
-            ));
-        }
         let _buffered_max = generation.buffered_max_usize()?;
-        let buffered_total = generation.buffered_total_usize()?;
-        if buffered_total > tokio::sync::Semaphore::MAX_PERMITS {
-            return Err(ConfigError::invalid(
-                "http_generation.buffered_request_total_bytes",
-                "exceeds the platform semaphore permit limit",
-            ));
-        }
         if generation.streamed_request_max_bytes < generation.buffered_request_max_bytes
             || generation.streamed_request_max_bytes > 4_294_967_296
         {
@@ -596,30 +582,12 @@ impl Config {
                 "must be at least the buffered limit and at most 4294967296",
             ));
         }
-        if !(1..=60_000).contains(&generation.connect_timeout_ms) {
-            return Err(ConfigError::invalid(
-                "http_generation.connect_timeout_ms",
-                "must be between 1 and 60000",
-            ));
-        }
-        if generation.request_timeout_ms < generation.connect_timeout_ms
+        if generation.request_timeout_ms < self.http.connect_timeout_ms
             || generation.request_timeout_ms > 3_600_000
         {
             return Err(ConfigError::invalid(
                 "http_generation.request_timeout_ms",
-                "must be at least connect_timeout_ms and at most 3600000",
-            ));
-        }
-        if !(1_000..=300_000).contains(&generation.pool_idle_timeout_ms) {
-            return Err(ConfigError::invalid(
-                "http_generation.pool_idle_timeout_ms",
-                "must be between 1000 and 300000",
-            ));
-        }
-        if !(1..=1_024).contains(&generation.pool_max_idle_per_host) {
-            return Err(ConfigError::invalid(
-                "http_generation.pool_max_idle_per_host",
-                "must be between 1 and 1024",
+                "must be at least http.connect_timeout_ms and at most 3600000",
             ));
         }
         if !self.workers.iter().any(|worker| {

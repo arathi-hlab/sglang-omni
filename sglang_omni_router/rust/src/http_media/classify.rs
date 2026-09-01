@@ -530,20 +530,27 @@ interval_ms = 100
 timeout_ms = 50
 success_threshold = 1
 failure_threshold = 1
+max_concurrent_probes = 1
+[http]
+buffered_request_total_bytes = 4096
+connect_timeout_ms = 100
+pool_idle_timeout_ms = 1000
+pool_max_idle_per_host = 1
 [http_generation]
 trust_domain = "local"
 buffered_request_max_bytes = 1024
-buffered_request_total_bytes = 4096
 streamed_request_max_bytes = 8192
-connect_timeout_ms = 100
 request_timeout_ms = 1000
-pool_idle_timeout_ms = 1000
-pool_max_idle_per_host = 1
 [[workers]]
 worker_id = "worker"
 base_url = "http://127.0.0.1:9"
 trust_domain = "local"
 default_model_id = "tts"
+[workers.capacity]
+generation_http = 1
+speech_http = 4
+speech_batch = 16
+transcription_http = 4
 [[workers.service_profiles]]
 service = "generation_http"
 model_ids = ["tts"]

@@ -49,7 +49,7 @@ impl TestDir {
     ) -> PathBuf {
         let path = self.0.join("router.toml");
         let contents = format!(
-            "schema_version = 1\n\n[server]\nlisten = \"{address}\"\nmax_connections = {max_connections}\nheader_read_timeout_ms = {header_read_timeout_ms}\n\n[shutdown]\ndrain_timeout_ms = {drain_timeout_ms}\n\n[logging]\nformat = \"json\"\nfilter = \"info\"\n\n[router]\nstrategy = \"round_robin\"\n\n[admission]\nglobal = 128\ngeneration_http = 64\n\n[health]\ninterval_ms = 100\ntimeout_ms = 50\nsuccess_threshold = 1\nfailure_threshold = 1\n\n[http_generation]\ntrust_domain = \"local\"\nbuffered_request_max_bytes = 1048576\nbuffered_request_total_bytes = 8388608\nstreamed_request_max_bytes = 1048576\nconnect_timeout_ms = 1000\nrequest_timeout_ms = 5000\npool_idle_timeout_ms = 30000\npool_max_idle_per_host = 8\n\n[[workers]]\nworker_id = \"worker-a\"\nbase_url = \"http://127.0.0.1:1/\"\ntrust_domain = \"local\"\ndefault_model_id = \"omni\"\nhealth_path = \"/health\"\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"omni\"]\nmessage_content_forms = [\"string\"]\nmedia_placements = []\ninput_modalities = [\"text\"]\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\"]\n"
+            "schema_version = 1\n\n[server]\nlisten = \"{address}\"\nmax_connections = {max_connections}\nheader_read_timeout_ms = {header_read_timeout_ms}\n\n[shutdown]\ndrain_timeout_ms = {drain_timeout_ms}\n\n[logging]\nformat = \"json\"\nfilter = \"info\"\n\n[router]\nstrategy = \"round_robin\"\nmax_concurrent_classifications = 4\n\n[admission]\nglobal = 128\ngeneration_http = 64\n\n[health]\ninterval_ms = 100\ntimeout_ms = 50\nsuccess_threshold = 1\nfailure_threshold = 1\n\n[http]\nbuffered_request_total_bytes = 8388608\nconnect_timeout_ms = 1000\npool_idle_timeout_ms = 30000\npool_max_idle_per_host = 8\n\n[http_generation]\ntrust_domain = \"local\"\nbuffered_request_max_bytes = 1048576\nstreamed_request_max_bytes = 1048576\nrequest_timeout_ms = 5000\n\n[[workers]]\nworker_id = \"worker-a\"\nbase_url = \"http://127.0.0.1:1/\"\ntrust_domain = \"local\"\ndefault_model_id = \"omni\"\nhealth_path = \"/health\"\n\n[workers.capacity]\ngeneration_http = 8\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"omni\"]\nmessage_content_forms = [\"string\"]\nmedia_placements = []\ninput_modalities = [\"text\"]\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\"]\n"
         );
         fs::write(&path, contents).expect("write isolated process config");
         path
@@ -86,7 +86,7 @@ impl ChildGuard {
             .arg(env!("CARGO_BIN_EXE_sgl-omni-router"))
             .arg(config)
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
+            .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn router with bounded RLIMIT_NOFILE");
@@ -407,35 +407,16 @@ fn invalid_connection_caps_fail_check_config_with_exit_two() {
 }
 
 #[test]
-fn low_hard_nofile_limit_warns_and_serves() {
+fn outbound_socket_budget_is_checked_before_serving() {
     let _process_guard = process_lock();
     let directory = TestDir::new();
     let address = unused_address();
     let config = directory.config(address, 128, 1_000);
     let mut child = ChildGuard::spawn_with_nofile(&config, 192);
 
-    wait_until_live(address, &mut child);
-    signal(child.id(), "-TERM");
-    assert_eq!(child.wait(PROCESS_DEADLINE).code(), Some(0));
-    let mut diagnostics = String::new();
-    child
-        .0
-        .stdout
-        .take()
-        .expect("file-limit log stream remains available")
-        .read_to_string(&mut diagnostics)
-        .expect("read file-limit log");
-    child
-        .0
-        .stderr
-        .take()
-        .expect("file-limit warning stream remains available")
-        .read_to_string(&mut diagnostics)
-        .expect("read file-limit warning");
-    assert!(
-        diagnostics.contains("RLIMIT_NOFILE remains below the recommended target"),
-        "missing file-limit warning: {diagnostics}"
-    );
+    assert_eq!(child.wait(PROCESS_DEADLINE).code(), Some(1));
+    TcpStream::connect_timeout(&address, Duration::from_millis(100))
+        .expect_err("invalid file limit must fail before the service becomes live");
 }
 
 #[test]

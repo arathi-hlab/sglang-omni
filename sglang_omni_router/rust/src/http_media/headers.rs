@@ -17,7 +17,6 @@ pub(super) enum RequestKind {
 
 pub(super) struct RequestFraming {
     pub(super) content_length: Option<u64>,
-    pub(super) transfer_framed: bool,
     pub(super) has_route_hint: bool,
     pub(super) content_type: HeaderValue,
     pub(super) boundary: Option<Vec<u8>>,
@@ -111,7 +110,6 @@ pub(super) fn validate_request(
     let has_route_hint = route_model.is_some() || route_stream.is_some();
     Ok(RequestFraming {
         content_length,
-        transfer_framed,
         has_route_hint,
         content_type,
         boundary,

@@ -27,8 +27,8 @@ struct Captured {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum WorkerBehavior {
     ConsumeRequest,
-    RespondAfterHeaders(&'static [u8]),
-    IgnoreRequest,
+    RejectAfterHeaders,
+    StreamWithoutReading,
 }
 
 struct Worker {
@@ -51,13 +51,13 @@ impl Worker {
         Self::start_with_guard(guard, WorkerBehavior::ConsumeRequest)
     }
 
-    fn start_early_response(response: &'static [u8]) -> Self {
+    fn start_early_response() -> Self {
         let guard = Rc::new(
             SOCKET_TEST_LOCK
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        Self::start_with_guard(guard, WorkerBehavior::RespondAfterHeaders(response))
+        Self::start_with_guard(guard, WorkerBehavior::RejectAfterHeaders)
     }
 
     fn start_stalled_upload() -> Self {
@@ -66,7 +66,7 @@ impl Worker {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        Self::start_with_guard(guard, WorkerBehavior::IgnoreRequest)
+        Self::start_with_guard(guard, WorkerBehavior::StreamWithoutReading)
     }
 
     fn start_pair() -> (Self, Self) {
@@ -90,10 +90,12 @@ impl Worker {
         let stop = Arc::new(AtomicBool::new(false));
         let healthy = Arc::new(AtomicBool::new(true));
         let health_requests = Arc::new(AtomicUsize::new(0));
+        let generation_requests = Arc::new(AtomicUsize::new(0));
         let captured = Arc::new(Mutex::new(Vec::new()));
         let thread_stop = Arc::clone(&stop);
         let thread_healthy = Arc::clone(&healthy);
         let thread_health_requests = Arc::clone(&health_requests);
+        let thread_generation_requests = Arc::clone(&generation_requests);
         let thread_captured = Arc::clone(&captured);
         let thread = thread::spawn(move || {
             let mut connections = Vec::new();
@@ -103,8 +105,16 @@ impl Worker {
                         let captures = Arc::clone(&thread_captured);
                         let healthy = Arc::clone(&thread_healthy);
                         let health_requests = Arc::clone(&thread_health_requests);
+                        let generation_requests = Arc::clone(&thread_generation_requests);
                         connections.push(thread::spawn(move || {
-                            serve_connection(stream, captures, healthy, health_requests, behavior);
+                            serve_connection(
+                                stream,
+                                captures,
+                                healthy,
+                                health_requests,
+                                generation_requests,
+                                behavior,
+                            );
                         }));
                     }
                     Ok((_stream, _peer)) => {}
@@ -196,6 +206,7 @@ fn serve_connection(
     captured: Arc<Mutex<Vec<Captured>>>,
     healthy: Arc<AtomicBool>,
     health_requests: Arc<AtomicUsize>,
+    generation_requests: Arc<AtomicUsize>,
     behavior: WorkerBehavior,
 ) {
     stream
@@ -215,17 +226,25 @@ fn serve_connection(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 );
                 health_requests.fetch_add(1, Ordering::AcqRel);
+            } else if behavior == WorkerBehavior::RejectAfterHeaders {
+                write_response(
+                    &mut stream,
+                    b"HTTP/1.1 422 Unprocessable Entity\r\nContent-Type: application/json\r\nContent-Length: 18\r\nConnection: close\r\n\r\n{\"early\":\"reject\"}",
+                );
             } else {
-                captured.lock().expect("record request").push(Captured {
-                    head,
-                    body: Vec::new(),
-                });
-                match behavior {
-                    WorkerBehavior::RespondAfterHeaders(response) => {
-                        write_response(&mut stream, response);
-                    }
-                    WorkerBehavior::IgnoreRequest => thread::sleep(Duration::from_secs(3)),
-                    WorkerBehavior::ConsumeRequest => unreachable!(),
+                let request = generation_requests.fetch_add(1, Ordering::AcqRel);
+                if request == 0 {
+                    write_response(
+                        &mut stream,
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\nB\r\ndata: one\n\n\r\n",
+                    );
+                    thread::sleep(Duration::from_secs(3));
+                    write_response(&mut stream, b"E\r\ndata: [DONE]\n\n\r\n0\r\n\r\n");
+                } else {
+                    write_response(
+                        &mut stream,
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    );
                 }
             }
         }
@@ -293,7 +312,7 @@ fn serve_connection(
             ),
             _ => write_response(
                 &mut stream,
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 8\r\nCache-Control: private\r\nCache-Control: max-age=0\r\nSet-Cookie: worker=1\r\nRetry-After: 1\r\nX-Request-ID: worker-id\r\nConnection: keep-alive\r\n\r\n{\"ok\":1}",
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 8\r\nCache-Control: private\r\nCache-Control: max-age=0\r\nSet-Cookie: hidden=1\r\nConnection: keep-alive\r\n\r\n{\"ok\":1}",
             ),
         }
     }
@@ -406,6 +425,7 @@ impl RouterProcess {
         Self::start_configured(
             &[("worker-a", worker, hostname, GenerationProfile::Text)],
             global,
+            global,
             timeout_ms,
             "round_robin",
             1_048_576,
@@ -417,12 +437,20 @@ impl RouterProcess {
         global: u32,
         timeout_ms: u64,
     ) -> Self {
-        Self::start_configured(workers, global, timeout_ms, "round_robin", 1_048_576)
+        Self::start_configured(
+            workers,
+            global,
+            global,
+            timeout_ms,
+            "round_robin",
+            1_048_576,
+        )
     }
 
     fn start_configured(
         workers: &[(&str, SocketAddr, bool, GenerationProfile)],
         global: u32,
+        worker_capacity: u32,
         timeout_ms: u64,
         strategy: &str,
         streamed_request_max_bytes: u64,
@@ -436,6 +464,7 @@ impl RouterProcess {
         Self::start_configured_models(
             &workers,
             global,
+            worker_capacity,
             timeout_ms,
             strategy,
             streamed_request_max_bytes,
@@ -445,6 +474,7 @@ impl RouterProcess {
     fn start_configured_models(
         workers: &[(&str, SocketAddr, bool, GenerationProfile, &str)],
         global: u32,
+        worker_capacity: u32,
         timeout_ms: u64,
         strategy: &str,
         streamed_request_max_bytes: u64,
@@ -468,13 +498,13 @@ impl RouterProcess {
             };
             let profile_fields = profile.manifest_fields();
             worker_config.push_str(&format!(
-                "\n[[workers]]\nworker_id = \"{worker_id}\"\nbase_url = \"{base_url}\"\ntrust_domain = \"local\"\ndefault_model_id = \"{default_model_id}\"\nhealth_path = \"/health\"\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"{default_model_id}\"]\n{profile_fields}\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\", \"streaming\"]\n"
+                "\n[[workers]]\nworker_id = \"{worker_id}\"\nbase_url = \"{base_url}\"\ntrust_domain = \"local\"\ndefault_model_id = \"{default_model_id}\"\nhealth_path = \"/health\"\n\n[workers.capacity]\ngeneration_http = {worker_capacity}\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"{default_model_id}\"]\n{profile_fields}\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\", \"streaming\"]\n"
             ));
         }
         fs::write(
             &config,
             format!(
-                "schema_version = 1\n\n[server]\nlisten = \"{address}\"\nmax_connections = 128\n\n[shutdown]\ndrain_timeout_ms = 2000\n\n[logging]\nformat = \"json\"\nfilter = \"info\"\n\n[router]\nstrategy = \"{strategy}\"\n\n[admission]\nglobal = {global}\ngeneration_http = {global}\n\n[health]\ninterval_ms = 100\ntimeout_ms = 50\nsuccess_threshold = 1\nfailure_threshold = 1\n\n[http_generation]\ntrust_domain = \"local\"\nbuffered_request_max_bytes = 1048576\nbuffered_request_total_bytes = 2097152\nstreamed_request_max_bytes = {streamed_request_max_bytes}\nconnect_timeout_ms = 100\nrequest_timeout_ms = {timeout_ms}\npool_idle_timeout_ms = 30000\npool_max_idle_per_host = 8\n{worker_config}"
+                "schema_version = 1\n\n[server]\nlisten = \"{address}\"\nmax_connections = 128\n\n[shutdown]\ndrain_timeout_ms = 2000\n\n[logging]\nformat = \"json\"\nfilter = \"info\"\n\n[router]\nstrategy = \"{strategy}\"\nmax_concurrent_classifications = 4\n\n[admission]\nglobal = {global}\ngeneration_http = {global}\n\n[health]\ninterval_ms = 100\ntimeout_ms = 50\nsuccess_threshold = 1\nfailure_threshold = 1\n\n[http]\nbuffered_request_total_bytes = 2097152\nconnect_timeout_ms = 100\npool_idle_timeout_ms = 30000\npool_max_idle_per_host = 8\n\n[http_generation]\ntrust_domain = \"local\"\nbuffered_request_max_bytes = 1048576\nstreamed_request_max_bytes = {streamed_request_max_bytes}\nrequest_timeout_ms = {timeout_ms}\n{worker_config}"
             ),
         )
         .expect("write router config");
@@ -568,7 +598,7 @@ fn post(address: SocketAddr, body: &[u8], request_id: Option<&str>) -> Vec<u8> {
     raw_request(address, &request).expect("complete routed request")
 }
 
-fn post_when_admission_releases(address: SocketAddr) -> Vec<u8> {
+fn post_when_capacity_releases(address: SocketAddr) -> Vec<u8> {
     let deadline = Instant::now() + DEADLINE;
     loop {
         let response = post(address, b"{}", None);
@@ -577,7 +607,7 @@ fn post_when_admission_releases(address: SocketAddr) -> Vec<u8> {
         }
         assert!(
             Instant::now() < deadline,
-            "router admission remained reserved"
+            "worker capacity remained reserved"
         );
         thread::sleep(Duration::from_millis(2));
     }
@@ -810,10 +840,7 @@ fn relay_holds_admission_and_is_not_cut_off_after_commitment() {
     assert_eq!(status(&first), 200);
     let head = response_head(&first).to_ascii_lowercase();
     assert_eq!(head.matches("cache-control:").count(), 2);
-    assert!(head.contains("set-cookie: worker=1"));
-    assert!(head.contains("retry-after: 1"));
-    assert!(!head.contains("x-request-id: worker-id"));
-    assert_eq!(head.matches("x-request-id:").count(), 1);
+    assert!(!head.contains("set-cookie:"));
 }
 
 #[test]
@@ -848,6 +875,25 @@ fn homogeneous_replicas_rotate_and_unhealthy_workers_are_filtered() {
 }
 
 #[test]
+fn worker_capacity_is_independent_from_global_admission() {
+    let worker = Worker::start();
+    let router = RouterProcess::start_configured(
+        &[("worker-a", worker.address, false, GenerationProfile::Text)],
+        2,
+        1,
+        2_000,
+        "round_robin",
+        1_048_576,
+    );
+
+    let address = router.address;
+    let slow = thread::spawn(move || post(address, b"slow", None));
+    worker.wait_for_requests(1);
+    assert_eq!(status(&post(router.address, b"{}", None)), 429);
+    assert_eq!(status(&slow.join().expect("join slow client")), 200);
+}
+
+#[test]
 fn least_requests_prefers_the_less_occupied_replica() {
     let (first, second) = Worker::start_pair();
     let router = RouterProcess::start_configured(
@@ -856,6 +902,7 @@ fn least_requests_prefers_the_less_occupied_replica() {
             ("worker-b", second.address, false, GenerationProfile::Text),
         ],
         4,
+        2,
         2_000,
         "least_requests",
         1_048_576,
@@ -1035,6 +1082,7 @@ fn heterogeneous_default_model_ambiguity_requires_an_explicit_model() {
             ),
         ],
         8,
+        8,
         2_000,
         "round_robin",
         1_048_576,
@@ -1076,7 +1124,7 @@ fn precommit_timeout_and_upstream_reset_are_bounded_and_release_admission() {
         String::from_utf8_lossy(&timeout),
         worker.captures()
     );
-    let recovered = post_when_admission_releases(router.address);
+    let recovered = post_when_capacity_releases(router.address);
     assert_ne!(
         status(&recovered),
         429,
@@ -1129,7 +1177,7 @@ fn early_upload_eof_and_downstream_disconnect_release_admission() {
     assert_ne!(count, 0);
     drop(disconnect);
 
-    let released = post_when_admission_releases(router.address);
+    let released = post_when_capacity_releases(router.address);
     assert_ne!(
         status(&released),
         429,
@@ -1137,8 +1185,9 @@ fn early_upload_eof_and_downstream_disconnect_release_admission() {
     );
 }
 
-fn assert_early_response_is_rejected(response: &'static [u8]) {
-    let worker = Worker::start_early_response(response);
+#[test]
+fn early_upstream_response_is_relayed_before_upload_completion() {
+    let worker = Worker::start_early_response();
     let router = RouterProcess::start(worker.address, 1, 2_000, false);
     let mut client = TcpStream::connect(router.address).expect("connect streaming upload");
     client
@@ -1155,38 +1204,29 @@ fn assert_early_response_is_rejected(response: &'static [u8]) {
         .read_to_end(&mut response)
         .expect("read early upstream response");
 
-    assert_eq!(status(&response), 502);
+    assert_eq!(status(&response), 422);
     assert!(
-        !response
+        response
             .windows(b"early".len())
             .any(|part| part == b"early")
     );
-
-    let released = post_when_admission_releases(router.address);
-    assert_ne!(status(&released), 429);
 }
 
 #[test]
-fn early_upstream_response_is_rejected_before_upload_completion() {
-    assert_early_response_is_rejected(
-        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
-    );
-    assert_early_response_is_rejected(
-        b"HTTP/1.1 422 Unprocessable Entity\r\nContent-Type: application/json\r\nContent-Length: 18\r\nConnection: close\r\n\r\n{\"early\":\"reject\"}",
-    );
-}
-
-#[test]
-fn outer_deadline_bounds_a_backpressured_upload() {
+fn upload_deadline_survives_early_stream_commitment() {
     let worker = Worker::start_stalled_upload();
     let router = RouterProcess::start_configured(
         &[("worker-a", worker.address, false, GenerationProfile::Text)],
+        1,
         1,
         300,
         "round_robin",
         64 * 1024 * 1024,
     );
-    let reader = TcpStream::connect(router.address).expect("connect stalled upload");
+    let mut reader = TcpStream::connect(router.address).expect("connect stalled upload");
+    reader
+        .set_read_timeout(Some(DEADLINE))
+        .expect("bound stalled-upload read");
     let mut writer = reader.try_clone().expect("clone stalled-upload client");
     writer
         .set_write_timeout(Some(DEADLINE))
@@ -1205,14 +1245,22 @@ fn outer_deadline_bounds_a_backpressured_upload() {
         }
     });
 
-    worker.wait_for_requests(1);
+    let mut committed = [0_u8; 512];
+    let count = reader
+        .read(&mut committed)
+        .expect("read committed SSE prefix");
+    assert!(committed[..count].starts_with(b"HTTP/1.1 200"));
 
     let release_started = Instant::now();
-    let released = post_when_admission_releases(router.address);
-    assert_eq!(status(&released), 504);
+    let released = post_when_capacity_releases(router.address);
+    assert_ne!(
+        status(&released),
+        429,
+        "post-commit upload deadline retained the sole admission permit"
+    );
     assert!(
         release_started.elapsed() < Duration::from_secs(2),
-        "capacity was released only when the worker closed the request"
+        "capacity was released only when the worker ended the response"
     );
     drop(reader);
     upload.join().expect("join stalled-upload writer");
@@ -1228,7 +1276,7 @@ fn upstream_failure_after_sse_commitment_releases_capacity() {
     assert!(response.windows(9).any(|part| part == b"data: one"));
     assert!(!response.windows(6).any(|part| part == b"[DONE]"));
 
-    let recovered = post_when_admission_releases(router.address);
+    let recovered = post_when_capacity_releases(router.address);
     assert_ne!(status(&recovered), 429);
 }
 

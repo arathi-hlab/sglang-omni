@@ -6,20 +6,13 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Extension, State};
-use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderValue, Method, Request, Response, Version};
-use tokio::sync::Semaphore;
 
 use crate::config::{Config, HttpMediaRoute};
 use crate::error::{HttpFault, RouterError};
-use crate::http_generation::{
-    BufferedBody, DirectRequestBody, DirectResponseBody, SharedUploadState, UploadState,
-    classify_blocking, read_buffered, reserve_budget,
-};
-use crate::request_id::{CanonicalRequestId, REQUEST_ID_HEADER};
-use crate::worker_pool::{
-    AdmissionError, CapacityClass, DispatchError, RequestLease, TrustDomain, WorkerPool,
-};
+use crate::http_relay::{HttpRelay, OutgoingRequest, map_admission, map_dispatch};
+use crate::request_id::CanonicalRequestId;
+use crate::worker_pool::{CapacityClass, TrustDomain, WorkerPool};
 
 use classify::Classified;
 use headers::{RequestKind, SuccessProfile};
@@ -31,15 +24,12 @@ const TRANSLATION_PATH: &str = "/v1/audio/translations";
 
 pub(crate) struct HttpMedia {
     pool: Arc<WorkerPool>,
-    client: reqwest::Client,
+    relay: Arc<HttpRelay>,
     trust: TrustDomain,
     enabled_routes: Box<[HttpMediaRoute]>,
     buffered_max: u64,
     streamed_max: u64,
-    buffered_budget: Arc<Semaphore>,
-    classification_slots: Arc<Semaphore>,
     request_timeout: std::time::Duration,
-    response_idle_timeout: Option<std::time::Duration>,
 }
 
 impl HttpMediaRoute {
@@ -80,26 +70,19 @@ impl HttpMedia {
     pub(crate) fn build(
         config: &Config,
         pool: Arc<WorkerPool>,
-        classification_slots: Arc<Semaphore>,
+        relay: Arc<HttpRelay>,
     ) -> Result<Option<Arc<Self>>, RouterError> {
         let Some(media) = config.http_media.as_ref() else {
             return Ok(None);
         };
-        let buffered_total = media.buffered_total_usize().map_err(RouterError::Config)?;
-        let client = pool
-            .media_client()
-            .ok_or(RouterError::WorkerPoolInvariant)?;
         Ok(Some(Arc::new(Self {
             pool,
-            client,
+            relay,
             trust: TrustDomain::new(media.trust_domain.clone()),
             enabled_routes: media.routes.clone().into_boxed_slice(),
             buffered_max: media.buffered_request_max_bytes,
             streamed_max: media.streamed_request_max_bytes,
-            buffered_budget: Arc::new(Semaphore::new(buffered_total)),
-            classification_slots,
             request_timeout: media.request_timeout(),
-            response_idle_timeout: media.response_idle_timeout(),
         })))
     }
 
@@ -179,9 +162,11 @@ async fn handle(
     let deadline = tokio::time::Instant::now() + media.request_timeout;
     let framing = headers::validate_request(request.headers(), route.request_kind())?;
     let direct_proof = if route != HttpMediaRoute::SpeechBatch
-        && framing.content_length.is_some_and(|length| {
-            length <= media.streamed_max && !framing.transfer_framed && !framing.has_route_hint
-        }) {
+        && !framing.has_route_hint
+        && framing
+            .content_length
+            .is_none_or(|length| length <= media.streamed_max)
+    {
         media.pool.content_blind_media_http(&media.trust, route)
     } else {
         None
@@ -213,58 +198,53 @@ async fn handle(
         )
     };
     if let Some(proof) = direct_proof {
-        let length = framing.content_length.ok_or(HttpFault::InternalError)?;
         let lease = proof
             .dispatch(admission.take().ok_or(HttpFault::InternalError)?)
             .map_err(map_dispatch)?;
-        let state = SharedUploadState::new(UploadState::Incomplete);
-        let direct = DirectRequestBody::new(request.into_body(), length, state.clone(), deadline);
-        return send_once(
-            media,
-            reqwest::Body::wrap(direct),
-            length,
+        let outgoing = OutgoingRequest::direct(
+            route.path(),
             framing.content_type,
-            lease,
-            route,
-            route.success_profile(),
-            request_id,
-            Some(state),
+            request.into_body(),
+            framing.content_length,
+            media.streamed_max,
+            deadline,
+        );
+        return Arc::clone(&media.relay)
+            .send(outgoing, lease, request_id, deadline, |status, headers| {
+                headers::sanitize_response(status, headers, route.success_profile())
+            })
+            .await;
+    }
+    let upload = media
+        .relay
+        .read_buffered(
+            request.into_body(),
+            framing.content_length,
+            media.buffered_max,
             deadline,
         )
-        .await;
-    }
-    let reserve = framing.content_length.unwrap_or(media.buffered_max);
-    let budget = reserve_budget(&media.buffered_budget, reserve)?;
-    let bytes = read_buffered(
-        request.into_body(),
-        framing.content_length,
-        media.buffered_max,
-        deadline,
-    )
-    .await?;
+        .await?;
     let content_type = framing.content_type;
     let boundary = framing.boundary;
     let route_model = framing.route_model;
     let route_stream = framing.route_stream;
     let classify_pool = Arc::clone(&media.pool);
     let classify_trust = media.trust.clone();
-    let (bytes, budget, classified) = classify_blocking(
-        Arc::clone(&media.classification_slots),
-        deadline,
-        move || {
+    let (upload, classified) = media
+        .relay
+        .classify(deadline, move || {
             let classified = classify(
                 route,
-                &bytes,
+                &upload.bytes,
                 boundary.as_deref(),
                 route_model.as_deref(),
                 route_stream,
                 &classify_pool,
                 &classify_trust,
             )?;
-            Ok((bytes, budget, classified))
-        },
-    )
-    .await?;
+            Ok((upload, classified))
+        })
+        .await?;
     let admission = match admission {
         Some(admission) => admission,
         None => media
@@ -280,21 +260,12 @@ async fn handle(
         .pool
         .dispatch(admission, &classified.requirement)
         .map_err(map_dispatch)?;
-    let length = u64::try_from(bytes.len()).map_err(|_| HttpFault::InternalError)?;
-    let body = reqwest::Body::wrap(BufferedBody::new(bytes, budget));
-    send_once(
-        media,
-        body,
-        length,
-        content_type,
-        lease,
-        route,
-        route.success_profile(),
-        request_id,
-        None,
-        deadline,
-    )
-    .await
+    let outgoing = OutgoingRequest::buffered(route.path(), content_type, upload)?;
+    Arc::clone(&media.relay)
+        .send(outgoing, lease, request_id, deadline, |status, headers| {
+            headers::sanitize_response(status, headers, route.success_profile())
+        })
+        .await
 }
 
 fn classify(
@@ -329,129 +300,5 @@ fn classify(
             pool,
             trust,
         ),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn send_once(
-    media: Arc<HttpMedia>,
-    body: reqwest::Body,
-    length: u64,
-    content_type: axum::http::HeaderValue,
-    lease: RequestLease,
-    route: HttpMediaRoute,
-    success: SuccessProfile,
-    request_id: HeaderValue,
-    upload: Option<SharedUploadState>,
-    deadline: tokio::time::Instant,
-) -> Result<Response<Body>, HttpFault> {
-    if tokio::time::Instant::now() >= deadline {
-        return Err(deadline_fault(upload.as_ref()));
-    }
-    let mut url = lease.target().base_url().clone();
-    url.set_path(route.path());
-    url.set_query(None);
-    let request = media
-        .client
-        .post(url)
-        .header(CONTENT_TYPE, content_type)
-        .header(CONTENT_LENGTH, length)
-        .header(REQUEST_ID_HEADER, request_id);
-    let request = request.body(body);
-    let sent = tokio::select! {
-        biased;
-        result = request.send() => result,
-        () = tokio::time::sleep_until(deadline) => {
-            let fault = deadline_fault(upload.as_ref());
-            if fault == HttpFault::UpstreamTimeout {
-                lease.request_immediate_probe();
-            }
-            return Err(fault);
-        },
-    };
-    let response = match sent {
-        Ok(response) => response,
-        Err(_source) => {
-            let fault = upload_fault(upload.as_ref())?.unwrap_or(HttpFault::UpstreamProtocolError);
-            if fault == HttpFault::UpstreamProtocolError {
-                lease.request_immediate_probe();
-            }
-            return Err(fault);
-        }
-    };
-    if let Some(fault) = upload_fault(upload.as_ref())? {
-        return Err(fault);
-    }
-    let response: axum::http::Response<reqwest::Body> = response.into();
-    let (parts, body) = response.into_parts();
-    let sanitized = match headers::sanitize_response(parts.status, &parts.headers, success) {
-        Ok(headers) => headers,
-        Err(fault) => {
-            drop(body);
-            lease.request_immediate_probe();
-            return Err(fault);
-        }
-    };
-    let relay = DirectResponseBody::new(
-        body,
-        lease,
-        upload,
-        deadline,
-        media.response_idle_timeout,
-    );
-    let mut downstream = Response::new(Body::new(relay));
-    *downstream.status_mut() = parts.status;
-    *downstream.headers_mut() = sanitized;
-    Ok(downstream)
-}
-
-fn upload_fault(upload: Option<&SharedUploadState>) -> Result<Option<HttpFault>, HttpFault> {
-    upload
-        .map(SharedUploadState::snapshot)
-        .transpose()
-        .map(|state| match state {
-            Some(UploadState::Failed(fault)) => Some(fault),
-            Some(UploadState::Incomplete | UploadState::Complete) | None => None,
-        })
-}
-
-fn deadline_fault(upload: Option<&SharedUploadState>) -> HttpFault {
-    match upload.map(SharedUploadState::snapshot).transpose() {
-        Err(fault) => fault,
-        Ok(Some(UploadState::Incomplete | UploadState::Failed(HttpFault::RequestTimeout))) => {
-            HttpFault::RequestTimeout
-        }
-        Ok(Some(UploadState::Failed(fault))) => fault,
-        Ok(Some(UploadState::Complete) | None) => HttpFault::UpstreamTimeout,
-    }
-}
-
-const fn map_admission(error: AdmissionError) -> HttpFault {
-    match error {
-        AdmissionError::Draining => HttpFault::RouterUnavailable,
-        AdmissionError::Overloaded => HttpFault::RouterOverloaded,
-    }
-}
-
-const fn map_dispatch(error: DispatchError) -> HttpFault {
-    match error {
-        DispatchError::NoEligibleProfile => HttpFault::NoCompatibleWorker,
-        DispatchError::Unavailable => HttpFault::RouterUnavailable,
-        DispatchError::Overloaded => HttpFault::RouterOverloaded,
-        DispatchError::Internal => HttpFault::InternalError,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use super::{UploadState, upload_fault};
-
-    #[test]
-    fn completed_upstream_response_accepts_an_incomplete_upload() {
-        let upload = Arc::new(Mutex::new(UploadState::Incomplete));
-
-        assert_eq!(upload_fault(Some(&upload)), Ok(None));
     }
 }
