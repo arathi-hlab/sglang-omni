@@ -266,6 +266,14 @@ fn serve_connection(
                 );
                 return;
             }
+            b"te-cl" => write_response(
+                &mut stream,
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\nConnection: close\r\n\r\n2\r\n{}\r\n0\r\n\r\n",
+            ),
+            b"te-compound" => write_response(
+                &mut stream,
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: gzip, chunked\r\nConnection: close\r\n\r\n2\r\n{}\r\n0\r\n\r\n",
+            ),
             _ => write_response(
                 &mut stream,
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 8\r\nCache-Control: private\r\nCache-Control: max-age=0\r\nSet-Cookie: hidden=1\r\nConnection: keep-alive\r\n\r\n{\"ok\":1}",
@@ -957,6 +965,20 @@ fn upstream_failure_after_sse_commitment_releases_capacity() {
 
     let recovered = post_when_capacity_releases(router.address);
     assert_ne!(status(&recovered), 429);
+}
+
+#[test]
+fn upstream_chunked_framing_is_normalized_before_commitment() {
+    let worker = Worker::start();
+    let router = RouterProcess::start(worker.address, 1, 2_000, false);
+
+    let decoded = post(router.address, b"te-cl", None);
+    assert_eq!(status(&decoded), 200);
+    assert!(decoded.windows(2).any(|part| part == b"{}"));
+    assert!(!response_head(&decoded).contains("content-length: 0"));
+
+    let unsupported = post(router.address, b"te-compound", None);
+    assert_eq!(status(&unsupported), 502);
 }
 
 #[test]

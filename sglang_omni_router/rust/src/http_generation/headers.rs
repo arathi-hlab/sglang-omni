@@ -53,6 +53,7 @@ pub(crate) fn sanitize_response(
     source: &HeaderMap,
 ) -> Result<HeaderMap, HttpFault> {
     let connection_tokens = connection_tokens(source)?;
+    let chunked = response_is_chunked(source)?;
     if !(status.is_success() || status.is_client_error() || status.is_server_error()) {
         return Err(HttpFault::UpstreamProtocolError);
     }
@@ -63,9 +64,17 @@ pub(crate) fn sanitize_response(
     }
     let mut content_types = source.get_all(CONTENT_TYPE).iter();
     let content_type = content_types.next();
-    let mut content_lengths = source.get_all(CONTENT_LENGTH).iter();
-    let content_length = content_lengths.next();
-    if content_types.next().is_some() || content_lengths.next().is_some() {
+    let content_length = if chunked {
+        None
+    } else {
+        let mut values = source.get_all(CONTENT_LENGTH).iter();
+        let first = values.next();
+        if values.next().is_some() {
+            return Err(HttpFault::UpstreamProtocolError);
+        }
+        first
+    };
+    if content_types.next().is_some() {
         return Err(HttpFault::UpstreamProtocolError);
     }
     if let Some(value) = content_type
@@ -91,12 +100,16 @@ pub(crate) fn sanitize_response(
     }
 
     let mut result = HeaderMap::new();
-    for name in [CONTENT_TYPE, CONTENT_LENGTH] {
-        if !connection_tokens.contains(name.as_str())
-            && let Some(value) = source.get(&name)
-        {
-            result.insert(name, value.clone());
-        }
+    if !connection_tokens.contains(CONTENT_TYPE.as_str())
+        && let Some(value) = content_type
+    {
+        result.insert(CONTENT_TYPE, value.clone());
+    }
+    if !chunked
+        && !connection_tokens.contains(CONTENT_LENGTH.as_str())
+        && let Some(value) = content_length
+    {
+        result.insert(CONTENT_LENGTH, value.clone());
     }
     for name in [
         CONTENT_ENCODING,
@@ -112,6 +125,21 @@ pub(crate) fn sanitize_response(
         }
     }
     Ok(result)
+}
+
+fn response_is_chunked(headers: &HeaderMap) -> Result<bool, HttpFault> {
+    let mut values = headers.get_all(TRANSFER_ENCODING).iter();
+    let Some(value) = values.next() else {
+        return Ok(false);
+    };
+    if values.next().is_some()
+        || !value
+            .to_str()
+            .is_ok_and(|value| value.trim().eq_ignore_ascii_case("chunked"))
+    {
+        return Err(HttpFault::UpstreamProtocolError);
+    }
+    Ok(true)
 }
 
 fn connection_tokens(headers: &HeaderMap) -> Result<HashSet<String>, HttpFault> {
@@ -459,6 +487,27 @@ mod tests {
             sanitize_response(StatusCode::OK, &duplicate_length).err(),
             Some(HttpFault::UpstreamProtocolError)
         );
+    }
+
+    #[test]
+    fn response_normalizes_decoded_chunked_framing() {
+        let mut chunked = HeaderMap::new();
+        chunked.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        chunked.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+        chunked.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
+        let sanitized =
+            sanitize_response(StatusCode::OK, &chunked).expect("valid decoded chunked response");
+        assert!(!sanitized.contains_key(CONTENT_LENGTH));
+        assert!(!sanitized.contains_key(TRANSFER_ENCODING));
+
+        for coding in ["gzip, chunked", "gzip"] {
+            let mut unsupported = chunked.clone();
+            unsupported.insert(TRANSFER_ENCODING, HeaderValue::from_static(coding));
+            assert_eq!(
+                sanitize_response(StatusCode::OK, &unsupported).err(),
+                Some(HttpFault::UpstreamProtocolError)
+            );
+        }
     }
 
     #[test]
