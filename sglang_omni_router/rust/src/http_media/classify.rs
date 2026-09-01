@@ -14,12 +14,10 @@ use crate::worker_pool::{
     TrustDomain, WorkerPool,
 };
 
-use super::headers::SuccessProfile;
 use super::multipart;
 
 pub(super) struct Classified {
     pub(super) requirement: RouteRequirement,
-    pub(super) success: SuccessProfile,
     pub(super) credits: u32,
 }
 
@@ -86,7 +84,6 @@ pub(super) fn speech_with_hints(
             },
             trust.clone(),
         ),
-        success: SuccessProfile::Speech(format, stream_mode),
         credits: 1,
     })
 }
@@ -198,7 +195,6 @@ pub(super) fn batch_with_hints(
             },
             trust.clone(),
         ),
-        success: SuccessProfile::Json,
         credits: u32::from(batch_size),
     })
 }
@@ -260,7 +256,7 @@ fn speech_to_text(
         Some(task),
     )?;
     let stream = merge_stream(facts.stream, route_stream)?;
-    let (format, success) = if stream {
+    let format = if stream {
         if !matches!(
             facts
                 .response_format
@@ -273,7 +269,7 @@ fn speech_to_text(
         ) {
             return Err(HttpFault::MalformedRequest);
         }
-        (TranscriptionResponseFormat::Sse, SuccessProfile::Sse)
+        TranscriptionResponseFormat::Sse
     } else {
         match facts
             .response_format
@@ -283,17 +279,11 @@ fn speech_to_text(
             .to_ascii_lowercase()
             .as_str()
         {
-            "json" => (
-                TranscriptionResponseFormat::Json,
-                SuccessProfile::TranscriptionJson,
-            ),
-            "text" => (TranscriptionResponseFormat::Text, SuccessProfile::Text),
-            "verbose_json" => (
-                TranscriptionResponseFormat::VerboseJson,
-                SuccessProfile::TranscriptionJson,
-            ),
-            "srt" => (TranscriptionResponseFormat::Srt, SuccessProfile::Text),
-            "vtt" => (TranscriptionResponseFormat::Vtt, SuccessProfile::Text),
+            "json" => TranscriptionResponseFormat::Json,
+            "text" => TranscriptionResponseFormat::Text,
+            "verbose_json" => TranscriptionResponseFormat::VerboseJson,
+            "srt" => TranscriptionResponseFormat::Srt,
+            "vtt" => TranscriptionResponseFormat::Vtt,
             _ => return Err(HttpFault::MalformedRequest),
         }
     };
@@ -311,7 +301,6 @@ fn speech_to_text(
             },
             trust.clone(),
         ),
-        success,
         credits: 1,
     })
 }

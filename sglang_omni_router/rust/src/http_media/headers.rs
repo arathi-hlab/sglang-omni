@@ -8,7 +8,6 @@ use crate::error::HttpFault;
 use crate::http_generation::{
     connection_tokens, is_request_media_type, parse_content_length, valid_generic_content_type,
 };
-use crate::worker_pool::{SpeechResponseFormat, StreamMode};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RequestKind {
@@ -28,13 +27,9 @@ pub(super) struct RequestFraming {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SuccessProfile {
-    Speech(SpeechResponseFormat, StreamMode),
-    Json,
-    TranscriptionJson,
-    Text,
-    Sse,
-    OpaqueSpeech,
-    OpaqueTranscription,
+    Speech,
+    SpeechBatch,
+    Transcription,
 }
 
 pub(super) fn validate_request(
@@ -183,8 +178,8 @@ pub(super) fn sanitize_response(
         if !valid_success_type(content_type, profile) {
             return Err(HttpFault::UpstreamProtocolError);
         }
-        if let Some(required) = pcm_metadata_required(content_type, profile) {
-            preserve_pcm_metadata = validate_pcm_metadata(source, &connection, required)?;
+        if profile == SuccessProfile::Speech && is_pcm(content_type) {
+            preserve_pcm_metadata = validate_pcm_metadata(source, &connection)?;
         }
     }
 
@@ -195,7 +190,7 @@ pub(super) fn sanitize_response(
         copy_all(source, &connection, &mut result, name);
     }
     match profile {
-        SuccessProfile::Speech(_, _) | SuccessProfile::OpaqueSpeech => {
+        SuccessProfile::Speech => {
             for name in [
                 CONTENT_DISPOSITION,
                 HeaderName::from_static("x-prompt-tokens"),
@@ -215,11 +210,7 @@ pub(super) fn sanitize_response(
                 }
             }
         }
-        SuccessProfile::Json => {}
-        SuccessProfile::TranscriptionJson
-        | SuccessProfile::Text
-        | SuccessProfile::Sse
-        | SuccessProfile::OpaqueTranscription => {}
+        SuccessProfile::SpeechBatch | SuccessProfile::Transcription => {}
     }
     Ok(result)
 }
@@ -227,20 +218,7 @@ pub(super) fn sanitize_response(
 fn valid_success_type(value: &str, profile: SuccessProfile) -> bool {
     let media = value.split(';').next().map(str::trim).unwrap_or_default();
     match profile {
-        SuccessProfile::Speech(format, _) => media.eq_ignore_ascii_case(match format {
-            SpeechResponseFormat::Mp3 => "audio/mpeg",
-            SpeechResponseFormat::Opus => "audio/opus",
-            SpeechResponseFormat::Aac => "audio/aac",
-            SpeechResponseFormat::Flac => "audio/flac",
-            SpeechResponseFormat::Wav => "audio/wav",
-            SpeechResponseFormat::Pcm => "audio/pcm",
-        }),
-        SuccessProfile::Json | SuccessProfile::TranscriptionJson => {
-            media.eq_ignore_ascii_case("application/json")
-        }
-        SuccessProfile::Text => media.eq_ignore_ascii_case("text/plain"),
-        SuccessProfile::Sse => media.eq_ignore_ascii_case("text/event-stream"),
-        SuccessProfile::OpaqueSpeech => [
+        SuccessProfile::Speech => [
             "audio/mpeg",
             "audio/opus",
             "audio/aac",
@@ -250,7 +228,8 @@ fn valid_success_type(value: &str, profile: SuccessProfile) -> bool {
         ]
         .iter()
         .any(|expected| media.eq_ignore_ascii_case(expected)),
-        SuccessProfile::OpaqueTranscription => {
+        SuccessProfile::SpeechBatch => media.eq_ignore_ascii_case("application/json"),
+        SuccessProfile::Transcription => {
             media.eq_ignore_ascii_case("application/json")
                 || media.eq_ignore_ascii_case("text/plain")
                 || media.eq_ignore_ascii_case("text/event-stream")
@@ -258,26 +237,16 @@ fn valid_success_type(value: &str, profile: SuccessProfile) -> bool {
     }
 }
 
-fn pcm_metadata_required(content_type: &str, profile: SuccessProfile) -> Option<bool> {
-    match profile {
-        SuccessProfile::Speech(SpeechResponseFormat::Pcm, StreamMode::Streaming) => Some(true),
-        SuccessProfile::Speech(SpeechResponseFormat::Pcm, StreamMode::NonStreaming) => Some(false),
-        SuccessProfile::OpaqueSpeech
-            if content_type
-                .split(';')
-                .next()
-                .is_some_and(|media| media.trim().eq_ignore_ascii_case("audio/pcm")) =>
-        {
-            Some(false)
-        }
-        _ => None,
-    }
+fn is_pcm(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .is_some_and(|media| media.trim().eq_ignore_ascii_case("audio/pcm"))
 }
 
 fn validate_pcm_metadata(
     source: &HeaderMap,
     connection: &std::collections::HashSet<String>,
-    required: bool,
 ) -> Result<bool, HttpFault> {
     let names = [
         HeaderName::from_static("x-sample-rate"),
@@ -285,7 +254,7 @@ fn validate_pcm_metadata(
         HeaderName::from_static("x-bit-depth"),
     ];
     let any_present = names.iter().any(|name| source.contains_key(name));
-    if !required && !any_present {
+    if !any_present {
         return Ok(false);
     }
     for name in names {
@@ -406,10 +375,7 @@ mod tests {
     use axum::http::header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE};
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
 
-    use super::{
-        HttpFault, RequestKind, SpeechResponseFormat, StreamMode, SuccessProfile,
-        sanitize_response, validate_request,
-    };
+    use super::{HttpFault, RequestKind, SuccessProfile, sanitize_response, validate_request};
 
     fn json_headers(content_type: &[u8]) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -580,22 +546,22 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         assert_eq!(
-            sanitize_response(StatusCode::FOUND, &headers, SuccessProfile::Json),
+            sanitize_response(StatusCode::FOUND, &headers, SuccessProfile::SpeechBatch),
             Err(HttpFault::UpstreamProtocolError)
         );
         assert_eq!(
-            sanitize_response(StatusCode::OK, &headers, SuccessProfile::Text),
+            sanitize_response(StatusCode::OK, &headers, SuccessProfile::Speech),
             Err(HttpFault::UpstreamProtocolError)
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("audio/x-private"));
         assert_eq!(
-            sanitize_response(StatusCode::OK, &headers, SuccessProfile::OpaqueSpeech),
+            sanitize_response(StatusCode::OK, &headers, SuccessProfile::Speech),
             Err(HttpFault::UpstreamProtocolError)
         );
     }
 
     #[test]
-    fn opaque_speech_accepts_only_supported_media_types() {
+    fn speech_accepts_only_supported_media_types() {
         for content_type in [
             "audio/mpeg",
             "audio/opus",
@@ -609,14 +575,14 @@ mod tests {
                 CONTENT_TYPE,
                 HeaderValue::from_str(content_type).expect("static media type"),
             );
-            sanitize_response(StatusCode::OK, &headers, SuccessProfile::OpaqueSpeech)
-                .expect("supported opaque speech type");
+            sanitize_response(StatusCode::OK, &headers, SuccessProfile::Speech)
+                .expect("supported speech type");
         }
     }
 
     #[test]
     fn speech_preserves_finish_reason_unless_connection_nominated() {
-        let profile = SuccessProfile::Speech(SpeechResponseFormat::Wav, StreamMode::NonStreaming);
+        let profile = SuccessProfile::Speech;
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("audio/wav"));
         headers.insert("x-finish-reason", HeaderValue::from_static("length"));
@@ -635,8 +601,8 @@ mod tests {
     }
 
     #[test]
-    fn known_streaming_pcm_requires_complete_positive_unique_metadata() {
-        let profile = SuccessProfile::Speech(SpeechResponseFormat::Pcm, StreamMode::Streaming);
+    fn pcm_metadata_is_optional_but_complete_positive_and_unique() {
+        let profile = SuccessProfile::Speech;
         let complete_source = pcm_headers(true);
         let complete = sanitize_response(StatusCode::OK, &complete_source, profile)
             .expect("streaming PCM complete metadata");
@@ -645,10 +611,7 @@ mod tests {
             complete_source.get("x-sample-rate")
         );
 
-        assert_eq!(
-            sanitize_response(StatusCode::OK, &pcm_headers(false), profile),
-            Err(HttpFault::UpstreamProtocolError)
-        );
+        assert!(sanitize_response(StatusCode::OK, &pcm_headers(false), profile).is_ok());
         let mut partial = pcm_headers(true);
         partial.remove("x-channels");
         assert_eq!(
@@ -682,37 +645,24 @@ mod tests {
     }
 
     #[test]
-    fn known_non_streaming_pcm_metadata_is_optional_but_all_or_none() {
-        assert_optional_pcm_metadata(SuccessProfile::Speech(
-            SpeechResponseFormat::Pcm,
-            StreamMode::NonStreaming,
-        ));
-    }
-
-    #[test]
-    fn opaque_pcm_metadata_is_optional_but_all_or_none() {
-        assert_optional_pcm_metadata(SuccessProfile::OpaqueSpeech);
+    fn absent_and_complete_pcm_metadata_are_relayable() {
+        assert_optional_pcm_metadata(SuccessProfile::Speech);
     }
 
     #[test]
     fn opus_mime_is_exact_and_non_pcm_drops_pcm_metadata() {
-        for profile in [
-            SuccessProfile::Speech(SpeechResponseFormat::Opus, StreamMode::NonStreaming),
-            SuccessProfile::OpaqueSpeech,
-        ] {
-            let mut exact = pcm_headers(true);
-            exact.insert(CONTENT_TYPE, HeaderValue::from_static("audio/opus"));
-            let sanitized = sanitize_response(StatusCode::OK, &exact, profile)
-                .expect("canonical Opus media type");
-            assert!(!sanitized.contains_key("x-sample-rate"));
-            assert!(!sanitized.contains_key("x-channels"));
-            assert!(!sanitized.contains_key("x-bit-depth"));
+        let mut exact = pcm_headers(true);
+        exact.insert(CONTENT_TYPE, HeaderValue::from_static("audio/opus"));
+        let sanitized = sanitize_response(StatusCode::OK, &exact, SuccessProfile::Speech)
+            .expect("canonical Opus media type");
+        assert!(!sanitized.contains_key("x-sample-rate"));
+        assert!(!sanitized.contains_key("x-channels"));
+        assert!(!sanitized.contains_key("x-bit-depth"));
 
-            exact.insert(CONTENT_TYPE, HeaderValue::from_static("audio/ogg"));
-            assert_eq!(
-                sanitize_response(StatusCode::OK, &exact, profile),
-                Err(HttpFault::UpstreamProtocolError)
-            );
-        }
+        exact.insert(CONTENT_TYPE, HeaderValue::from_static("audio/ogg"));
+        assert_eq!(
+            sanitize_response(StatusCode::OK, &exact, SuccessProfile::Speech),
+            Err(HttpFault::UpstreamProtocolError)
+        );
     }
 }

@@ -67,11 +67,11 @@ impl HttpMediaRoute {
         }
     }
 
-    const fn opaque_success(self) -> SuccessProfile {
+    const fn success_profile(self) -> SuccessProfile {
         match self {
-            Self::Speech => SuccessProfile::OpaqueSpeech,
-            Self::SpeechBatch => SuccessProfile::Json,
-            Self::Transcription | Self::Translation => SuccessProfile::OpaqueTranscription,
+            Self::Speech => SuccessProfile::Speech,
+            Self::SpeechBatch => SuccessProfile::SpeechBatch,
+            Self::Transcription | Self::Translation => SuccessProfile::Transcription,
         }
     }
 }
@@ -226,7 +226,7 @@ async fn handle(
             framing.content_type,
             lease,
             route,
-            route.opaque_success(),
+            route.success_profile(),
             request_id,
             Some(state),
             deadline,
@@ -289,7 +289,7 @@ async fn handle(
         content_type,
         lease,
         route,
-        classified.success,
+        route.success_profile(),
         request_id,
         None,
         deadline,
