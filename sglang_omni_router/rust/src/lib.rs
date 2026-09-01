@@ -18,27 +18,13 @@ use std::path::Path;
 pub use config::{Config, LogFormat};
 pub use error::{ConfigError, RouterError};
 
-/// Successful result of executing the process composition root.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RunOutcome {
-    /// The configuration was valid and no listener was created.
-    ConfigValid,
-    /// The service terminated cleanly after receiving its first signal.
-    CleanShutdown,
-}
-
-/// Loads configuration and either validates it or runs the service to a
-/// terminal outcome.
+/// Loads a validated configuration and runs the service to a clean shutdown.
 ///
 /// Configuration loading and tracing initialization occur before the Tokio
 /// runtime is created. Runtime work owns one server task and joins it on every
-/// clean or forced shutdown path.
-pub fn execute(config_path: &Path, check_config: bool) -> Result<RunOutcome, RouterError> {
+/// shutdown path.
+pub fn run(config_path: &Path) -> Result<(), RouterError> {
     let config = Config::load(config_path)?;
-    if check_config {
-        return Ok(RunOutcome::ConfigValid);
-    }
-
     prepare_file_limit(&config)?;
     init_tracing(&config)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -48,7 +34,7 @@ pub fn execute(config_path: &Path, check_config: bool) -> Result<RunOutcome, Rou
         .build()
         .map_err(RouterError::RuntimeBuild)?;
     runtime.block_on(server::serve(config))?;
-    Ok(RunOutcome::CleanShutdown)
+    Ok(())
 }
 
 #[cfg(unix)]
