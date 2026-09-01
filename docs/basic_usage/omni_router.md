@@ -197,8 +197,16 @@ input and output modalities, response format, and stream mode. Classification
 runs under one shared concurrency limit. The original bytes are forwarded
 without reconstructing JSON or multipart content.
 
-Classification completes before worker selection, so classification does not
-occupy an upstream connection.
+The direct path is bounded by `streamed_request_max_bytes`. The classified path
+is bounded by `buffered_request_max_bytes` per request and
+`buffered_request_total_bytes` across concurrent requests. Their defaults are
+512 MiB, 8 MiB, and 256 MiB respectively. Requests without an explicit model
+return `ambiguous_model` when compatible workers do not share one default.
+Classified JSON follows the standard JSON number grammar; non-standard `NaN`
+and `Infinity` tokens are rejected.
+
+Classification completes before worker selection, so classification
+does not occupy an upstream connection.
 
 ### Worker selection
 
