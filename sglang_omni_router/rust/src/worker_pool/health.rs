@@ -122,26 +122,14 @@ async fn run_worker_health(
     loop {
         tokio::select! {
             biased;
-            changed = shutdown.changed() => {
-                match changed {
-                    Ok(()) if *shutdown.borrow() => return,
-                    Ok(()) => continue,
-                    Err(_) => return,
-                }
-            }
+            _ = shutdown.changed() => return,
             () = record.immediate_probe.notified() => {}
             _ = ticker.tick() => {}
         }
 
         let response = tokio::select! {
             biased;
-            changed = shutdown.changed() => {
-                match changed {
-                    Ok(()) if *shutdown.borrow() => return,
-                    Ok(()) => continue,
-                    Err(_) => return,
-                }
-            }
+            _ = shutdown.changed() => return,
             result = client.get(record.target.health_url().clone()).send() => {
                 result
             }
@@ -164,13 +152,7 @@ async fn run_worker_health(
             loop {
                 tokio::select! {
                     biased;
-                    changed = shutdown.changed() => {
-                        match changed {
-                            Ok(()) if *shutdown.borrow() => return,
-                            Ok(()) => continue,
-                            Err(_) => return,
-                        }
-                    }
+                    _ = shutdown.changed() => return,
                     chunk = response.chunk() => {
                         if !matches!(chunk, Ok(Some(_))) {
                             break;
@@ -669,7 +651,7 @@ mod tests {
             test_record(0, stalled_address),
             test_record(1, healthy_address),
         ];
-        let client = test_client(&records, Duration::from_secs(1));
+        let client = test_client(&records, Duration::from_secs(5));
         let mut supervisor =
             HealthSupervisor::start(&records, client, Duration::from_secs(60), 1, 1);
         tokio::time::timeout(Duration::from_secs(1), async {
