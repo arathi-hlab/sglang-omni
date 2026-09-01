@@ -25,6 +25,39 @@ AUDIO_STAGE = "audio_encoder"
 THINKER_STAGE = "thinker"
 DECODE_STAGE = "decode"
 MM_AGGREGATE_STAGE = "mm_aggregate"
+TALKER_STAGE = "talker"
+CODE2WAV_STAGE = "code2wav"
+
+
+def output_modalities(request: Any) -> set[str] | None:
+    # The serving client forwards the API-level ``modalities`` field as
+    # ``metadata["output_modalities"]`` (same contract qwen3_omni reads).
+    metadata = getattr(request, "metadata", None) or {}
+    modalities = metadata.get("output_modalities")
+    if modalities is None:
+        params = getattr(request, "params", None) or {}
+        modalities = params.get("output_modalities") or params.get("modalities")
+    if modalities is None:
+        return None
+    if isinstance(modalities, str):
+        values = (modalities,)
+    elif isinstance(modalities, (list, tuple, set)):
+        values = modalities
+    else:
+        return None
+    return {str(modality).lower() for modality in values}
+
+
+def should_generate_audio_output(
+    payload_or_request: Any,
+) -> bool:
+    request = (
+        payload_or_request.request
+        if isinstance(payload_or_request, StagePayload)
+        else payload_or_request
+    )
+    modalities = output_modalities(request)
+    return modalities is None or "audio" in modalities
 
 
 def _resolve_seed(params: dict[str, Any]) -> int | None:
@@ -95,6 +128,47 @@ def project_encoder_to_mm_aggregate(payload: StagePayload) -> StagePayload:
     stage_name = next(iter(state.encoder_outs))
     projected = MiniCPMOPipelineState(
         encoder_outs={stage_name: state.encoder_outs[stage_name]}
+    )
+    return _payload_with_state(payload, projected)
+
+
+def resolve_thinker_next_stages(
+    request_id: str, output: StagePayload
+) -> list[str]:
+    del request_id
+    if should_generate_audio_output(output):
+        return [DECODE_STAGE, TALKER_STAGE]
+    return [DECODE_STAGE]
+
+
+def resolve_terminal_stages(request: Any) -> list[str]:
+    if should_generate_audio_output(request):
+        return [DECODE_STAGE, CODE2WAV_STAGE]
+    return [DECODE_STAGE]
+
+
+def project_thinker_to_talker(payload: StagePayload) -> StagePayload:
+    """Keep only what the talker consumes: prompt ids + thinker output ids
+    and the per-step hidden state sequence."""
+    state = MiniCPMOPipelineState.from_dict(payload.data)
+    thinker_out = state.thinker_out if isinstance(state.thinker_out, dict) else {}
+    extra = thinker_out.get("extra_model_outputs") or {}
+    projected = MiniCPMOPipelineState(
+        prompt=dict(state.prompt) if isinstance(state.prompt, dict) else None,
+        thinker_out={
+            "output_ids": list(thinker_out.get("output_ids") or []),
+            "extra_model_outputs": {
+                "hidden_states_seq": extra.get("hidden_states_seq") or [],
+            },
+        },
+    )
+    return _payload_with_state(payload, projected)
+
+
+def project_talker_to_code2wav(payload: StagePayload) -> StagePayload:
+    state = MiniCPMOPipelineState.from_dict(payload.data)
+    projected = MiniCPMOPipelineState(
+        engine_outputs={TALKER_STAGE: state.engine_outputs.get(TALKER_STAGE) or {}},
     )
     return _payload_with_state(payload, projected)
 
@@ -406,6 +480,81 @@ def apply_thinker_result(
     state.thinker_out = thinker_out
     state.engine_outputs[stage_name] = thinker_out
     return thinker_out
+
+
+# ---------------------------------------------------------------------------
+# Talker request builders
+# ---------------------------------------------------------------------------
+
+
+def build_talker_request(
+    state: MiniCPMOPipelineState,
+    *,
+    tts_bos_token_id: int,
+    tts_eos_token_id: int,
+) -> dict[str, torch.Tensor]:
+    """Slice the ``<|tts_bos|>``…``<|tts_eos|>`` span for the TTS condition.
+
+    Mirrors the remote code's tts_bound: over the full sequence (prompt +
+    generated), start = last ``<|tts_bos|>`` index + 1, end = last
+    ``<|tts_eos|>`` index (or sequence end when absent). Each position pairs
+    its token id with the thinker's last-layer hidden state at the same
+    position. ``hidden_states_seq`` entry k covers full-sequence position
+    ``prompt_len - 1 + k`` (prefill captures the last prompt position; decode
+    step k captures the position of output token k-1), so positions before
+    ``prompt_len - 1`` have no hidden state and cannot enter the span.
+    """
+    prompt = state.prompt or {}
+    input_ids = prompt.get("input_ids")
+    prompt_ids = (
+        input_ids.reshape(-1).tolist()
+        if isinstance(input_ids, torch.Tensor)
+        else list(input_ids or [])
+    )
+    thinker_out = state.thinker_out if isinstance(state.thinker_out, dict) else {}
+    output_ids = [int(t) for t in (thinker_out.get("output_ids") or [])]
+    extra = thinker_out.get("extra_model_outputs") or {}
+    hidden_seq = extra.get("hidden_states_seq") or []
+
+    full_sequence = [int(t) for t in prompt_ids] + output_ids
+    prompt_len = len(prompt_ids)
+
+    tts_bos_indices = [
+        i for i, t in enumerate(full_sequence) if t == tts_bos_token_id
+    ]
+    tts_eos_indices = [
+        i for i, t in enumerate(full_sequence) if t == tts_eos_token_id
+    ]
+    if not tts_bos_indices:
+        empty = torch.empty(0, dtype=torch.long)
+        return {"tts_token_ids": empty, "tts_hidden": empty}
+    start = tts_bos_indices[-1] + 1
+    end = tts_eos_indices[-1] if tts_eos_indices else len(full_sequence)
+
+    hidden_base = prompt_len - 1  # full-sequence position of hidden_seq[0]
+    if start < hidden_base:
+        raise ValueError(
+            f"tts span start {start} precedes first captured hidden position "
+            f"{hidden_base}; prompt-side spans are not supported"
+        )
+    end = min(end, hidden_base + len(hidden_seq))
+    if end <= start:
+        empty = torch.empty(0, dtype=torch.long)
+        return {"tts_token_ids": empty, "tts_hidden": empty}
+
+    tokens = torch.tensor(full_sequence[start:end], dtype=torch.long)
+    hidden = torch.stack(
+        [hidden_seq[i - hidden_base] for i in range(start, end)]
+    )
+    return {"tts_token_ids": tokens, "tts_hidden": hidden}
+
+
+def apply_talker_result(
+    state: MiniCPMOPipelineState,
+    *,
+    result: dict[str, Any],
+) -> None:
+    state.engine_outputs[TALKER_STAGE] = dict(result)
 
 
 def make_thinker_scheduler_adapters(

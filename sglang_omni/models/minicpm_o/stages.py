@@ -21,13 +21,16 @@ def create_preprocessing_executor(
     model_path: str,
     *,
     max_seq_len: int | None = None,
+    speech_enabled: bool = False,
 ):
     from sglang_omni.models.minicpm_o.components.preprocessor import (
         MiniCPMOPreprocessor,
     )
     from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
-    preprocessor = MiniCPMOPreprocessor(model_path, max_seq_len=max_seq_len)
+    preprocessor = MiniCPMOPreprocessor(
+        model_path, max_seq_len=max_seq_len, speech_enabled=speech_enabled
+    )
 
     async def _preprocess(payload: StagePayload) -> StagePayload:
         return await preprocessor(payload)
@@ -133,6 +136,81 @@ def create_audio_encoder_executor(
     return _create_encoder_executor(model, stage_name="audio_encoder")
 
 
+def create_talker_executor(
+    model_path: str,
+    *,
+    device: str | None = None,
+    dtype: str | None = None,
+):
+    from transformers import AutoTokenizer
+
+    from sglang_omni.models.minicpm_o.components.talker import MiniCPMOTalker
+    from sglang_omni.models.minicpm_o.payload_types import MiniCPMOPipelineState
+    from sglang_omni.models.minicpm_o.request_builders import (
+        apply_talker_result,
+        build_talker_request,
+    )
+    from sglang_omni.models.weight_loader import resolve_model_path
+    from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+    from sglang_omni.utils.device import resolve_device_spec
+
+    model = MiniCPMOTalker(
+        model_path, device=resolve_device_spec(device), dtype=dtype
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        str(resolve_model_path(model_path)), trust_remote_code=True
+    )
+    tts_bos_token_id = tokenizer.convert_tokens_to_ids("<|tts_bos|>")
+    tts_eos_token_id = tokenizer.convert_tokens_to_ids("<|tts_eos|>")
+
+    def _talk(payload: StagePayload) -> StagePayload:
+        state = MiniCPMOPipelineState.from_dict(payload.data)
+        request = build_talker_request(
+            state,
+            tts_bos_token_id=tts_bos_token_id,
+            tts_eos_token_id=tts_eos_token_id,
+        )
+        result = model(**request)
+        apply_talker_result(state, result=result)
+        payload.data = state.to_dict()
+        return payload
+
+    return SimpleScheduler(_talk)
+
+
+def create_code2wav_executor(
+    model_path: str,
+    *,
+    device: str | None = None,
+):
+    from sglang_omni.models.minicpm_o.components.code2wav import MiniCPMOCode2Wav
+    from sglang_omni.models.minicpm_o.payload_types import MiniCPMOPipelineState
+    from sglang_omni.models.minicpm_o.request_builders import TALKER_STAGE
+    from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+    from sglang_omni.utils.audio_payload import audio_waveform_payload
+    from sglang_omni.utils.device import resolve_device_spec
+
+    model = MiniCPMOCode2Wav(model_path, device=resolve_device_spec(device))
+
+    def _vocode(payload: StagePayload) -> StagePayload:
+        state = MiniCPMOPipelineState.from_dict(payload.data)
+        talker_out = state.engine_outputs.get(TALKER_STAGE) or {}
+        result = model(codec_tokens=talker_out["codec_tokens"])
+        # Terminal payload goes back through msgpack: keep only the audio
+        # fields, no tensors from the pipeline state.
+        payload.data = dict(
+            audio_waveform_payload(
+                result["waveform"],
+                sample_rate=int(result["sample_rate"]),
+                modality="audio",
+                source_hint="MiniCPM-o",
+            )
+        )
+        return payload
+
+    return SimpleScheduler(_vocode)
+
+
 def create_decode_executor(model_path: str):
     # State keys deliberately mirror qwen3_omni, so its streaming text
     # detokenizer applies unchanged.
@@ -160,6 +238,7 @@ def create_sglang_thinker_executor_from_config(
     total_gpu_memory_fraction: float | None = None,
     enable_async_decode: bool = True,
     async_decode_min_batch_size: int = 2,
+    speech_enabled: bool = False,
 ):
     """Returns OmniScheduler for the MiniCPM-o thinker."""
     from sglang_omni.models.minicpm_o.bootstrap import create_thinker_scheduler
@@ -205,6 +284,7 @@ def create_sglang_thinker_executor_from_config(
         total_gpu_memory_fraction=total_gpu_memory_fraction,
         enable_async_decode=enable_async_decode,
         async_decode_min_batch_size=async_decode_min_batch_size,
+        speech_enabled=speech_enabled,
     )
     logger.info(
         f"sglang_ar_started stage=thinker gpu_id={gpu_id} "

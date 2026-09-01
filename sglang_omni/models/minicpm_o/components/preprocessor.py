@@ -51,7 +51,13 @@ def _first_batch_item(value: Any) -> Any:
 
 
 class MiniCPMOPreprocessor:
-    def __init__(self, model_path: str, *, max_seq_len: int | None = None):
+    def __init__(
+        self,
+        model_path: str,
+        *,
+        max_seq_len: int | None = None,
+        speech_enabled: bool = False,
+    ):
         local_dir = _resolve_local_model_dir(model_path)
         self.tokenizer = AutoTokenizer.from_pretrained(
             local_dir, trust_remote_code=True
@@ -61,6 +67,18 @@ class MiniCPMOPreprocessor:
         self._local_dir = local_dir
         self._processor = None
         self.max_seq_len = max_seq_len
+        # Speech pipelines render the tts chat template for audio-output
+        # requests so the thinker emits a <|tts_bos|>...<|tts_eos|> span for
+        # the talker; the remote code's chat() does the same via
+        # use_tts_template before generating speech.
+        self._speech_enabled = speech_enabled
+
+    def _use_tts_template(self, payload: StagePayload) -> bool:
+        from sglang_omni.models.minicpm_o.request_builders import (
+            should_generate_audio_output,
+        )
+
+        return self._speech_enabled and should_generate_audio_output(payload)
 
     @property
     def processor(self):
@@ -96,7 +114,9 @@ class MiniCPMOPreprocessor:
             prompt_text = ""
             input_ids = torch.tensor(messages, dtype=torch.long)
         else:
-            prompt_text = self._render_chat_template(messages)
+            prompt_text = self._render_chat_template(
+                messages, use_tts_template=self._use_tts_template(payload)
+            )
             encoded = self.tokenizer(prompt_text, return_tensors="pt")
             input_ids = encoded["input_ids"][0].to(dtype=torch.long)
         attention_mask = torch.ones_like(input_ids)
@@ -172,7 +192,8 @@ class MiniCPMOPreprocessor:
                 messages, num_images=len(images), num_audios=len(audios)
             )
         prompt_text = self._render_chat_template(
-            messages, use_tts_template=bool(audios)
+            messages,
+            use_tts_template=bool(audios) or self._use_tts_template(payload),
         )
 
         processed = self.processor(
