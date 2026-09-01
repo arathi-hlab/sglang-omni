@@ -68,6 +68,12 @@ def test_clip_length_past_the_native_limit_is_rejected():
         manager.merge_config({"audio_chunking.max_audio_clip_s": "60"})
 
 
+def test_clip_length_below_the_minimum_useful_length_is_rejected():
+    manager = ConfigManager(WhisperASRPipelineConfig(model_path="dummy"))
+    with pytest.raises(ValueError, match="minimum useful clip length"):
+        manager.merge_config({"audio_chunking.max_audio_clip_s": "0.5"})
+
+
 @pytest.mark.parametrize(
     "path",
     [
