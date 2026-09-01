@@ -28,6 +28,7 @@ struct Captured {
 enum WorkerBehavior {
     ConsumeRequest,
     RejectAfterHeaders,
+    StreamWithoutReading,
 }
 
 struct Worker {
@@ -57,6 +58,15 @@ impl Worker {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
         Self::start_with_guard(guard, WorkerBehavior::RejectAfterHeaders)
+    }
+
+    fn start_stalled_upload() -> Self {
+        let guard = Rc::new(
+            SOCKET_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        Self::start_with_guard(guard, WorkerBehavior::StreamWithoutReading)
     }
 
     fn start_pair() -> (Self, Self) {
@@ -197,7 +207,7 @@ fn serve_connection(
     stream
         .set_write_timeout(Some(DEADLINE))
         .expect("bound worker write");
-    if behavior == WorkerBehavior::RejectAfterHeaders {
+    if behavior != WorkerBehavior::ConsumeRequest {
         if let Some(head) = read_request_head(&mut stream) {
             if head.starts_with("GET /health HTTP/1.1") {
                 write_response(
@@ -205,11 +215,18 @@ fn serve_connection(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 );
                 health_requests.fetch_add(1, Ordering::AcqRel);
-            } else {
+            } else if behavior == WorkerBehavior::RejectAfterHeaders {
                 write_response(
                     &mut stream,
                     b"HTTP/1.1 422 Unprocessable Entity\r\nContent-Type: application/json\r\nContent-Length: 18\r\nConnection: close\r\n\r\n{\"early\":\"reject\"}",
                 );
+            } else {
+                write_response(
+                    &mut stream,
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\nB\r\ndata: one\n\n\r\n",
+                );
+                thread::sleep(Duration::from_millis(750));
+                write_response(&mut stream, b"E\r\ndata: [DONE]\n\n\r\n0\r\n\r\n");
             }
         }
         return;
@@ -950,6 +967,34 @@ fn early_upstream_response_is_relayed_before_upload_completion() {
         response
             .windows(b"early".len())
             .any(|part| part == b"early")
+    );
+}
+
+#[test]
+fn upload_deadline_survives_early_stream_commitment() {
+    let worker = Worker::start_stalled_upload();
+    let router = RouterProcess::start(worker.address, 1, 300, false);
+    let mut client = TcpStream::connect(router.address).expect("connect stalled upload");
+    client
+        .set_read_timeout(Some(DEADLINE))
+        .expect("bound stalled-upload read");
+    client
+        .write_all(
+            b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n{",
+        )
+        .expect("write partial stalled upload");
+
+    let mut committed = [0_u8; 512];
+    let count = client
+        .read(&mut committed)
+        .expect("read committed SSE prefix");
+    assert!(committed[..count].starts_with(b"HTTP/1.1 200"));
+
+    let released = post_when_capacity_releases(router.address);
+    assert_ne!(
+        status(&released),
+        429,
+        "post-commit upload deadline retained the sole admission permit"
     );
 }
 

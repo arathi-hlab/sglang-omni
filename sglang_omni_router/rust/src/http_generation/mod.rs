@@ -178,7 +178,7 @@ async fn send_once(
             return Err(fault);
         }
     };
-    let relay = DirectResponseBody::new(body, lease);
+    let relay = DirectResponseBody::new(body, lease, outgoing.upload, deadline);
     let mut downstream = Response::new(Body::new(relay));
     *downstream.status_mut() = parts.status;
     *downstream.headers_mut() = headers;
