@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 def create_preprocessing_executor(
     model_path: str,
     *,
-    max_seq_len: int | None = None,
     speech_enabled: bool = False,
 ):
     from sglang_omni.models.minicpm_o.components.preprocessor import (
@@ -28,9 +27,7 @@ def create_preprocessing_executor(
     )
     from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
-    preprocessor = MiniCPMOPreprocessor(
-        model_path, max_seq_len=max_seq_len, speech_enabled=speech_enabled
-    )
+    preprocessor = MiniCPMOPreprocessor(model_path, speech_enabled=speech_enabled)
 
     async def _preprocess(payload: StagePayload) -> StagePayload:
         return await preprocessor(payload)
@@ -136,46 +133,67 @@ def create_audio_encoder_executor(
     return _create_encoder_executor(model, stage_name="audio_encoder")
 
 
-def create_talker_executor(
+def create_sglang_talker_executor_from_config(
     model_path: str,
     *,
-    device: str | None = None,
-    dtype: str | None = None,
+    gpu_id: int = 0,
+    tp_rank: int = 0,
+    tp_size: int = 1,
+    nccl_port: int | None = None,
+    max_seq_len: int = 4096,
+    server_args_overrides: dict[str, Any] | None = None,
+    total_gpu_memory_fraction: float | None = None,
 ):
-    from transformers import AutoTokenizer
-
-    from sglang_omni.models.minicpm_o.components.talker import MiniCPMOTalker
-    from sglang_omni.models.minicpm_o.payload_types import MiniCPMOPipelineState
-    from sglang_omni.models.minicpm_o.request_builders import (
-        apply_talker_result,
-        build_talker_request,
+    """Returns OmniScheduler for the native sglang MiniCPM-o talker."""
+    from sglang_omni.models.minicpm_o.bootstrap import create_talker_scheduler
+    from sglang_omni.scheduling.generation_batch_policy import (
+        build_generation_batch_overrides,
+        validate_generation_batch_policy,
     )
-    from sglang_omni.models.weight_loader import resolve_model_path
-    from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
-    from sglang_omni.utils.device import resolve_device_spec
+    from sglang_omni.scheduling.sglang_backend import build_sglang_server_args
+    from sglang_omni.utils.misc import avail_gpu_mem
 
-    model = MiniCPMOTalker(
-        model_path, device=resolve_device_spec(device), dtype=dtype
+    overrides = build_generation_batch_overrides(
+        max_running_requests=32,
+        server_args_overrides=server_args_overrides,
+        disable_cuda_graph=False,
+        sampling_backend="pytorch",
     )
-    tokenizer = AutoTokenizer.from_pretrained(
-        str(resolve_model_path(model_path)), trust_remote_code=True
+    overrides["tp_size"] = tp_size
+    # The talker shares the thinker's GPU; a fraction-based KV budget would
+    # starve the thinker engine. Cap the pool at the worst case instead:
+    # every running request at full context.
+    overrides.setdefault("max_total_tokens", 32 * max_seq_len)
+    server_args = build_sglang_server_args(
+        model_path,
+        context_length=max_seq_len,
+        **overrides,
     )
-    tts_bos_token_id = tokenizer.convert_tokens_to_ids("<|tts_bos|>")
-    tts_eos_token_id = tokenizer.convert_tokens_to_ids("<|tts_eos|>")
+    validate_generation_batch_policy(
+        model_name="MiniCPM-o talker",
+        server_args=server_args,
+    )
 
-    def _talk(payload: StagePayload) -> StagePayload:
-        state = MiniCPMOPipelineState.from_dict(payload.data)
-        request = build_talker_request(
-            state,
-            tts_bos_token_id=tts_bos_token_id,
-            tts_eos_token_id=tts_eos_token_id,
-        )
-        result = model(**request)
-        apply_talker_result(state, result=result)
-        payload.data = state.to_dict()
-        return payload
-
-    return SimpleScheduler(_talk)
+    logger.info(
+        f"sglang_ar_startup stage=talker gpu_id={gpu_id} tp_rank={tp_rank}/{tp_size} "
+        f"context_length={max_seq_len} "
+        f"total_gpu_memory_fraction={total_gpu_memory_fraction} "
+        f"mem_fraction_static={server_args.mem_fraction_static} "
+        f"pre_load_avail_mem={avail_gpu_mem(gpu_id)} "
+        f"pid={os.getpid()}"
+    )
+    scheduler = create_talker_scheduler(
+        server_args,
+        gpu_id,
+        tp_rank=tp_rank,
+        nccl_port=nccl_port,
+        total_gpu_memory_fraction=total_gpu_memory_fraction,
+    )
+    logger.info(
+        f"sglang_ar_started stage=talker gpu_id={gpu_id} "
+        f"post_load_avail_mem={avail_gpu_mem(gpu_id)} pid={os.getpid()}"
+    )
+    return scheduler
 
 
 def create_code2wav_executor(

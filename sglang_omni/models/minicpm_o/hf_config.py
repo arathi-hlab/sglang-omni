@@ -21,9 +21,6 @@ from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 class MiniCPMOConfig(PretrainedConfig):
     model_type = "minicpmo"
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
     def get_text_config(self, decoder=False) -> PretrainedConfig:
         del decoder
         # transformers calls this during __init__ (token-id validation) before

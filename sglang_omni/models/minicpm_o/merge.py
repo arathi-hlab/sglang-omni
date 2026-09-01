@@ -24,11 +24,9 @@ def merge_for_thinker(payloads: dict[str, StagePayload]) -> StagePayload:
     model_inputs: dict[str, Any] = {}
     for payload in payloads.values():
         branch = MiniCPMOPipelineState.from_dict(payload.data)
-        for stage_name, encoder_out in branch.encoder_outs.items():
+        for encoder_out in branch.encoder_outs.values():
             if isinstance(encoder_out, dict):
                 model_inputs.update(encoder_out)
-            elif encoder_out is not None:
-                model_inputs[stage_name] = encoder_out
 
     state.thinker_inputs = {"model_inputs": model_inputs}
     state.encoder_inputs = {}

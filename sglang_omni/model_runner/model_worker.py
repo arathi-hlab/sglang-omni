@@ -145,6 +145,26 @@ class ModelWorker:
             model_config.head_dim = int(cfg.d_model) // int(cfg.decoder_attention_heads)
             model_config.v_head_dim = model_config.head_dim
             return
+        if arch == "MiniCPMOTalkerForCausalLM":
+            # The MiniCPM-o checkpoint keeps tts_config nested on the flat
+            # root config; size the KV cache from the talker backbone.
+            cfg = model_config.hf_config.tts_config
+            if not isinstance(cfg, dict):
+                cfg = cfg.to_dict()
+            # get_num_kv_heads() reads hf_text_config; leaving it on the
+            # thinker text config would size the KV pool with the wrong
+            # head count.
+            model_config.hf_text_config = SimpleNamespace(**cfg)
+            model_config.hidden_size = int(cfg["hidden_size"])
+            model_config.num_attention_heads = int(cfg["num_attention_heads"])
+            model_config.num_key_value_heads = int(cfg["num_key_value_heads"])
+            model_config.num_hidden_layers = int(cfg["num_hidden_layers"])
+            model_config.head_dim = (
+                model_config.hidden_size // model_config.num_attention_heads
+            )
+            model_config.v_head_dim = model_config.head_dim
+            model_config.vocab_size = int(cfg["num_audio_tokens"])
+            return
         entry = _ARCH_CONFIG_MAP.get(arch)
         if entry is None:
             return

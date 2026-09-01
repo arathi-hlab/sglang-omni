@@ -37,7 +37,6 @@ class MiniCPMOPipelineState:
     process boundaries.
     """
 
-    raw_inputs: Any | None = None
     prompt: PromptInputs | None = None
     mm_inputs: dict[str, Any] = field(default_factory=dict)
     encoder_inputs: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -58,7 +57,6 @@ class MiniCPMOPipelineState:
 
         thinker_out = data.get("thinker_out")
         return cls(
-            raw_inputs=data.get("raw_inputs"),
             prompt=data.get("prompt"),
             mm_inputs=_dict("mm_inputs"),
             encoder_inputs=_dict("encoder_inputs"),
@@ -71,8 +69,6 @@ class MiniCPMOPipelineState:
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {}
-        if self.raw_inputs is not None:
-            data["raw_inputs"] = self.raw_inputs
         if self.prompt is not None:
             data["prompt"] = self.prompt
         if self.mm_inputs:

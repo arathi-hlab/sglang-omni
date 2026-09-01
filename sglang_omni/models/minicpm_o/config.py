@@ -11,6 +11,7 @@ from sglang_omni.config import (
     EngineStageConfig,
     FactoryArgs,
     PipelineConfig,
+    PlacementConfig,
     StageConfig,
 )
 
@@ -23,7 +24,6 @@ def _preprocessing_stage(*, process: str) -> StageConfig:
         name="preprocessing",
         process=process,
         factory_path=f"{_PKG}.stages.create_preprocessing_executor",
-        factory=FactoryArgs(max_seq_len=8192),
         next=["image_encoder", "audio_encoder", "mm_aggregate"],
         route_fn=f"{_PKG}.request_builders.resolve_preprocessing_next_stages",
         project_payload={
@@ -119,10 +119,11 @@ def _decode_stage(*, process: str) -> StageConfig:
 
 
 def _talker_stage(*, gpu: int, process: str) -> StageConfig:
-    return StageConfig(
+    return EngineStageConfig(
         name="talker",
         process=process,
-        factory_path=f"{_PKG}.stages.create_talker_executor",
+        factory_path=f"{_PKG}.stages.create_sglang_talker_executor_from_config",
+        factory=FactoryArgs(max_seq_len=4096),
         gpu=gpu,
         next="code2wav",
         project_payload={
@@ -160,7 +161,9 @@ def _speech_stages() -> list[StageConfig]:
         _aggregate_stage(process="pipeline", gpu=0),
         _thinker_stage(gpu=0, process="pipeline", speech_enabled=True),
         _decode_stage(process="pipeline"),
-        _talker_stage(gpu=0, process="pipeline"),
+        # The sglang talker is a second engine; it cannot share the thinker's
+        # process (one torch tensor-parallel group per process).
+        _talker_stage(gpu=0, process="talker"),
         _code2wav_stage(gpu=0, process="pipeline"),
     ]
 
@@ -179,13 +182,25 @@ class MiniCPMOPipelineConfig(PipelineConfig):
 
 
 class MiniCPMOSpeechPipelineConfig(MiniCPMOPipelineConfig):
-    """Speech pipeline: text stages + talker (MiniCPMTTS) + code2wav
-    (stepaudio2 Token2wav). Audio output arrives non-streaming, one wav per
-    request."""
+    """Speech pipeline: text stages + talker (native sglang AR stage) +
+    code2wav (stepaudio2 Token2wav). Audio output arrives non-streaming, one
+    wav per request."""
 
-    terminal_stages_fn: str | None = (
-        f"{_PKG}.request_builders.resolve_terminal_stages"
+    stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        THINKER_STAGE: EngineStageConfig,
+        "talker": EngineStageConfig,
+    }
+
+    # The talker engine runs in a separate process on the thinker's GPU; skip
+    # per-stage memory-fraction budgets like qwen3_omni does and let sglang's
+    # mem_fraction_static govern each engine.
+    placement: PlacementConfig = Field(
+        default_factory=lambda: PlacementConfig(
+            require_memory_fraction_for_colocation=False
+        )
     )
+
+    terminal_stages_fn: str | None = f"{_PKG}.request_builders.resolve_terminal_stages"
     stages: list[StageConfig] = Field(default_factory=_speech_stages)
 
     def stage_factory_kwargs(self, stage_name: str) -> dict[str, Any]:

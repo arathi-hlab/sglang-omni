@@ -55,7 +55,6 @@ class MiniCPMOPreprocessor:
         self,
         model_path: str,
         *,
-        max_seq_len: int | None = None,
         speech_enabled: bool = False,
     ):
         local_dir = _resolve_local_model_dir(model_path)
@@ -66,7 +65,6 @@ class MiniCPMOPreprocessor:
         # text-only deployments never need it.
         self._local_dir = local_dir
         self._processor = None
-        self.max_seq_len = max_seq_len
         # Speech pipelines render the tts chat template for audio-output
         # requests so the thinker emits a <|tts_bos|>...<|tts_eos|> span for
         # the talker; the remote code's chat() does the same via
