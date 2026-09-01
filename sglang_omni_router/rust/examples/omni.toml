@@ -24,7 +24,6 @@ interval_ms = 5000
 timeout_ms = 5000
 success_threshold = 2
 failure_threshold = 3
-max_concurrent_probes = 16
 
 [http_generation]
 trust_domain = "local"

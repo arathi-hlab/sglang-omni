@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::watch;
 use tokio::task::{JoinError, JoinSet};
 
 use super::WorkerRecord;
@@ -56,16 +56,13 @@ impl HealthSupervisor {
         interval: Duration,
         success_threshold: u8,
         failure_threshold: u8,
-        max_concurrent_probes: usize,
     ) -> Self {
         let (shutdown, receiver) = watch::channel(false);
-        let budget = Arc::new(Semaphore::new(max_concurrent_probes));
         let mut tasks = JoinSet::new();
         for record in records {
             tasks.spawn(run_worker_health(
                 Arc::clone(record),
                 client.clone(),
-                Arc::clone(&budget),
                 receiver.clone(),
                 interval,
                 success_threshold,
@@ -113,7 +110,6 @@ impl HealthSupervisor {
 async fn run_worker_health(
     record: Arc<WorkerRecord>,
     client: reqwest::Client,
-    budget: Arc<Semaphore>,
     mut shutdown: watch::Receiver<bool>,
     interval: Duration,
     success_threshold: u8,
@@ -137,27 +133,9 @@ async fn run_worker_health(
             _ = ticker.tick() => {}
         }
 
-        let permit = tokio::select! {
-            biased;
-            changed = shutdown.changed() => {
-                match changed {
-                    Ok(()) if *shutdown.borrow() => return,
-                    Ok(()) => continue,
-                    Err(_) => return,
-                }
-            }
-            result = Arc::clone(&budget).acquire_owned() => {
-                let Ok(permit) = result else {
-                    return;
-                };
-                permit
-            }
-        };
-
         let success = tokio::select! {
             biased;
             changed = shutdown.changed() => {
-                drop(permit);
                 match changed {
                     Ok(()) if *shutdown.borrow() => return,
                     Ok(()) => continue,
@@ -168,7 +146,6 @@ async fn run_worker_health(
                 result.is_ok_and(|response| response.status().is_success())
             }
         };
-        drop(permit);
         let previous = record.health.load();
         let next = tracker.observe(success);
         record.health.store(next);
@@ -314,7 +291,6 @@ mod tests {
             Duration::from_secs(60),
             1,
             1,
-            1,
         );
         let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
         while record.health.load() != WorkerHealth::Healthy
@@ -344,7 +320,6 @@ mod tests {
             &[Arc::clone(&record)],
             client,
             Duration::from_secs(60),
-            1,
             1,
             1,
         );
@@ -380,7 +355,6 @@ mod tests {
             &[Arc::clone(&record)],
             client,
             Duration::from_secs(60),
-            1,
             1,
             1,
         );
@@ -432,7 +406,6 @@ mod tests {
             &[Arc::clone(&record)],
             client,
             Duration::from_secs(60),
-            1,
             1,
             1,
         );
@@ -532,7 +505,6 @@ mod tests {
             Duration::from_secs(60),
             1,
             1,
-            1,
         );
         let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
         while first_probe_active.load(Ordering::Acquire) == 0
@@ -556,72 +528,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_probe_budget_bounds_concurrency() {
-        const WORKERS: usize = 8;
-        const MAX_CONCURRENT: usize = 2;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind concurrency fixture");
-        let address = listener
+    async fn stalled_worker_does_not_delay_other_workers() {
+        let stalled_listener =
+            TcpListener::bind("127.0.0.1:0").expect("bind stalled worker fixture");
+        let stalled_address = stalled_listener
             .local_addr()
-            .expect("read concurrency fixture address");
-        let active = Arc::new(AtomicUsize::new(0));
-        let maximum = Arc::new(AtomicUsize::new(0));
-        let server_active = Arc::clone(&active);
-        let server_maximum = Arc::clone(&maximum);
-        let server = thread::spawn(move || {
-            let mut handlers = Vec::with_capacity(WORKERS);
-            for _ in 0..WORKERS {
-                let (mut stream, _) = listener.accept().expect("accept bounded health probe");
-                let handler_active = Arc::clone(&server_active);
-                let handler_maximum = Arc::clone(&server_maximum);
-                handlers.push(thread::spawn(move || {
-                    let current = handler_active.fetch_add(1, Ordering::AcqRel) + 1;
-                    handler_maximum.fetch_max(current, Ordering::AcqRel);
-                    let mut request = [0_u8; 1024];
-                    let _bytes = stream.read(&mut request).expect("read bounded probe");
-                    thread::sleep(Duration::from_millis(50));
-                    stream
-                        .write_all(
-                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                        )
-                        .expect("write bounded health response");
-                    handler_active.fetch_sub(1, Ordering::AcqRel);
-                }));
+            .expect("read stalled worker fixture address");
+        let healthy_listener =
+            TcpListener::bind("127.0.0.1:0").expect("bind healthy worker fixture");
+        let healthy_address = healthy_listener
+            .local_addr()
+            .expect("read healthy worker fixture address");
+        let stalled_started = Arc::new(AtomicBool::new(false));
+        let stalled_release = Arc::new(AtomicBool::new(false));
+
+        let server_started = Arc::clone(&stalled_started);
+        let server_release = Arc::clone(&stalled_release);
+        let stalled_server = thread::spawn(move || {
+            let (mut stream, _) = stalled_listener
+                .accept()
+                .expect("accept stalled worker probe");
+            let mut request = [0_u8; 1024];
+            let _bytes = stream
+                .read(&mut request)
+                .expect("read stalled worker probe");
+            server_started.store(true, Ordering::Release);
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !server_release.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                thread::yield_now();
             }
-            for handler in handlers {
-                handler.join().expect("join bounded probe handler");
-            }
+            assert!(server_release.load(Ordering::Acquire));
         });
-        let records: Vec<_> = (0..WORKERS)
-            .map(|ordinal| test_record(ordinal, address))
-            .collect();
+
+        let healthy_server_started = Arc::clone(&stalled_started);
+        let healthy_server = thread::spawn(move || {
+            let (mut stream, _) = healthy_listener
+                .accept()
+                .expect("accept healthy worker probe");
+            let mut request = [0_u8; 1024];
+            let _bytes = stream
+                .read(&mut request)
+                .expect("read healthy worker probe");
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !healthy_server_started.load(Ordering::Acquire)
+                && std::time::Instant::now() < deadline
+            {
+                thread::yield_now();
+            }
+            assert!(healthy_server_started.load(Ordering::Acquire));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .expect("write healthy worker response");
+        });
+
+        let records = [
+            test_record(0, stalled_address),
+            test_record(1, healthy_address),
+        ];
         let client = test_client(&records, Duration::from_secs(1));
-        let mut supervisor = HealthSupervisor::start(
-            &records,
-            client,
-            Duration::from_secs(60),
-            1,
-            1,
-            MAX_CONCURRENT,
-        );
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while records
-            .iter()
-            .any(|record| record.health.load() != WorkerHealth::Healthy)
-            && tokio::time::Instant::now() < deadline
-        {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        assert!(
-            records
-                .iter()
-                .all(|record| record.health.load() == WorkerHealth::Healthy)
-        );
-        server.join().expect("join concurrency fixture");
-        assert!(maximum.load(Ordering::Acquire) <= MAX_CONCURRENT);
+        let mut supervisor =
+            HealthSupervisor::start(&records, client, Duration::from_secs(60), 1, 1);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while records[1].health.load() != WorkerHealth::Healthy {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("healthy worker probe must not wait for stalled worker");
+        assert!(stalled_started.load(Ordering::Acquire));
+        assert_eq!(records[0].health.load(), WorkerHealth::Unknown);
+
         supervisor.cancel();
         while !supervisor.is_empty() {
             assert!(matches!(supervisor.join_next().await, Some(Ok(()))));
         }
+        stalled_release.store(true, Ordering::Release);
+        stalled_server.join().expect("join stalled worker fixture");
+        healthy_server.join().expect("join healthy worker fixture");
     }
 }

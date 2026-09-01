@@ -135,7 +135,7 @@ The top-level sections are:
 | `logging` | Structured log format and tracing filter |
 | `router` | Routing policy, classification concurrency, and optional voice owner |
 | `admission` | Global and per-service in-flight limits |
-| `health` | Probe interval, timeout, thresholds, and concurrency |
+| `health` | Probe interval, timeout, and transition thresholds |
 | `http_generation` | Chat request limits, trust domain, upstream timeouts, and pool settings |
 | `http_media` | Enabled media routes, request limits, trust domain, and upstream settings |
 | `websocket` | Speech and realtime routes with setup, connection, and close bounds |
@@ -252,8 +252,8 @@ worker-local voice data.
 
 ## Health and Readiness
 
-Workers start with unknown health. Status-only probes apply the configured
-consecutive success and failure thresholds under a shared probe limit.
+Workers start with unknown health. Each worker has one serial probe loop that
+applies the configured consecutive success and failure thresholds.
 Transport and upstream protocol failures can request an immediate coalesced
 probe. Application responses and capacity exhaustion do not directly change
 worker health.

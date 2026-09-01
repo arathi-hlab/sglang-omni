@@ -141,7 +141,6 @@ impl WorkerPool {
             config.health.interval(),
             config.health.success_threshold(),
             config.health.failure_threshold(),
-            config.health.max_concurrent_probes(),
         )
     }
 

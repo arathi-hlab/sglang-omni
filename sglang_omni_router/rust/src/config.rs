@@ -107,7 +107,6 @@ pub(crate) struct HealthConfig {
     timeout_ms: u64,
     success_threshold: u8,
     failure_threshold: u8,
-    max_concurrent_probes: u8,
 }
 
 impl Default for HealthConfig {
@@ -117,7 +116,6 @@ impl Default for HealthConfig {
             timeout_ms: 5_000,
             success_threshold: 2,
             failure_threshold: 3,
-            max_concurrent_probes: 16,
         }
     }
 }
@@ -137,10 +135,6 @@ impl HealthConfig {
 
     pub(crate) fn failure_threshold(&self) -> u8 {
         self.failure_threshold
-    }
-
-    pub(crate) fn max_concurrent_probes(&self) -> usize {
-        usize::from(self.max_concurrent_probes)
     }
 }
 
@@ -376,12 +370,6 @@ impl Config {
             return Err(ConfigError::invalid(
                 "health",
                 "thresholds must be between 1 and 32",
-            ));
-        }
-        if !(1..=64).contains(&self.health.max_concurrent_probes) {
-            return Err(ConfigError::invalid(
-                "health.max_concurrent_probes",
-                "must be between 1 and 64",
             ));
         }
         Ok(())
