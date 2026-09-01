@@ -528,7 +528,7 @@ class PipelineConfig(BaseModel):
                 f"{self.audio_chunking.max_audio_clip_s:g} must not exceed "
                 f"the model's native clip limit ({native:g}s)"
             )
-        
+
         if self.audio_chunking.max_audio_clip_s < type(self).min_tail_s:
             raise ValueError(
                 f"audio_chunking.max_audio_clip_s="
