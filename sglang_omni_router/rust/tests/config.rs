@@ -109,6 +109,25 @@ fn validates_connection_cap_boundaries() {
 }
 
 #[test]
+fn validates_classification_concurrency_boundaries() {
+    for value in [1, 64] {
+        let config = valid_config("127.0.0.1:30000", 30_000, "info").replace(
+            "max_concurrent_classifications = 4",
+            &format!("max_concurrent_classifications = {value}"),
+        );
+        assert!(load_bytes(config.as_bytes()).is_ok());
+    }
+
+    for value in [0, 65] {
+        let config = valid_config("127.0.0.1:30000", 30_000, "info").replace(
+            "max_concurrent_classifications = 4",
+            &format!("max_concurrent_classifications = {value}"),
+        );
+        assert!(load_bytes(config.as_bytes()).is_err());
+    }
+}
+
+#[test]
 fn enabled_router_accepts_non_loopback_listener() {
     let config = load_bytes(valid_config("0.0.0.0:30000", 30_000, "info").as_bytes())
         .expect("an explicit non-loopback listener should be valid");
