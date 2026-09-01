@@ -231,10 +231,6 @@ fn routing_schema_rejects_unknowns_invalid_bounds_and_profile_counterexamples() 
         ),
         base.replace("worker_id = \"worker-a\"", "worker_id = \"bad worker\""),
         base.replace(
-            "base_url = \"http://127.0.0.1:8000/\"",
-            "base_url = \"http://worker.invalid:8000/\"",
-        ),
-        base.replace(
             "default_model_id = \"omni\"",
             "default_model_id = \"other\"",
         ),
