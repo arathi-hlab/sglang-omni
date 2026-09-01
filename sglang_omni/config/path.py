@@ -834,6 +834,8 @@ def iter_schema_paths(
 
         if _is_model(core):
             for name, field in core.model_fields.items():
+                if name == "audio_chunking" and _is_chunkless_pipeline(core):
+                    continue
                 child = prefix + (name,)
                 _emit(child)
                 walk(field.annotation, child, depth + 1)
