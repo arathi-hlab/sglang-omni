@@ -176,10 +176,7 @@ impl WorkerPool {
                 let start = self.selector.start(eligible_count);
                 self.reserve_round_robin(start, &matches)
             }
-            RoutingStrategy::LeastRequests => {
-                let start = self.selector.start(self.records.len());
-                self.reserve_least_requests(start, &matches)
-            }
+            RoutingStrategy::LeastRequests => self.reserve_least_requests(&matches),
         };
         drop(gate);
         drop(policy_guard);
@@ -225,32 +222,40 @@ impl WorkerPool {
 
     fn reserve_least_requests(
         &self,
-        start: usize,
         matches: &impl Fn(&WorkerRecord) -> bool,
     ) -> Option<(Arc<WorkerRecord>, tokio::sync::OwnedSemaphorePermit)> {
         let mut snapshots = [usize::MAX; MAX_WORKERS];
         let mut attempted = [false; MAX_WORKERS];
-        for (index, record) in self.records.iter().enumerate() {
+        let mut eligible_count = 0;
+        for record in &self.records {
+            let index = record.registration_id.startup_ordinal();
             if matches(record) && record.is_routable() {
                 snapshots[index] = record.occupancy_snapshot();
+                eligible_count += 1;
             }
         }
-        for _ in 0..self.records.len() {
+        let start = self.selector.start(eligible_count);
+        for _ in 0..eligible_count {
             let mut best: Option<(usize, usize, usize)> = None;
+            let mut eligible_ordinal = 0;
             for (index, occupancy) in snapshots
                 .iter()
                 .copied()
                 .enumerate()
                 .take(self.records.len())
             {
-                if occupancy == usize::MAX || attempted[index] {
+                if occupancy == usize::MAX {
                     continue;
                 }
-                let ordinal = self.records[index].registration_id.startup_ordinal();
+                let ordinal = eligible_ordinal;
+                eligible_ordinal += 1;
+                if attempted[index] {
+                    continue;
+                }
                 let rank = if ordinal >= start {
                     ordinal - start
                 } else {
-                    self.records.len() - start + ordinal
+                    eligible_count - start + ordinal
                 };
                 let key = (occupancy, rank);
                 if best
@@ -591,6 +596,29 @@ mod tests {
             drop(lease);
         }
         assert_eq!(selected, [0, 2, 0, 2, 0, 2]);
+    }
+
+    #[test]
+    fn least_requests_rotates_equal_load_over_sparse_eligible_workers_without_bias() {
+        let records = vec![
+            record(0, "remote", "other", 1),
+            record(1, "local", "omni", 1),
+            record(2, "remote", "other", 1),
+            record(3, "local", "omni", 1),
+        ];
+        let pool = pool(RoutingStrategy::LeastRequests, records, 8);
+        let trust = TrustDomain::new(String::from("local"));
+        let mut selected = Vec::new();
+        for _ in 0..6 {
+            let lease = pool
+                .content_blind_generation_http(&trust)
+                .expect("homogeneous cohort")
+                .dispatch(pool.try_admit().expect("admit sparse least requests"))
+                .expect("dispatch sparse least requests");
+            selected.push(lease.registration_ordinal());
+            drop(lease);
+        }
+        assert_eq!(selected, [1, 3, 1, 3, 1, 3]);
     }
 
     #[test]
