@@ -382,6 +382,19 @@ impl WorkerPool {
         })
     }
 
+    pub(crate) fn supports_speech_batch_size(&self, trust: &TrustDomain, size: u32) -> bool {
+        self.records.iter().any(|record| {
+            &record.trust_domain == trust
+                && record.profiles.iter().any(|profile| {
+                    matches!(
+                        profile,
+                        ServiceProfile::SpeechBatch { max_batch_size, .. }
+                            if u32::from(*max_batch_size) >= size
+                    )
+                })
+        })
+    }
+
     pub(crate) fn drain(&self) {
         self.admission.close();
     }

@@ -520,7 +520,7 @@ filter = "error"
 [router]
 strategy = "round_robin"
 [admission]
-global = 8
+global = 16
 generation_http = 1
 speech_http = 4
 transcription_http = 4

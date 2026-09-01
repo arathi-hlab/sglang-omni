@@ -164,7 +164,7 @@ fn generation_and_media_handlers_are_independently_configurable() {
 }
 
 #[test]
-fn speech_batch_profile_maximum_must_fit_class_admission() {
+fn speech_batch_profile_maximum_is_independent_from_capacity_budgets() {
     let generation_only = valid_config("127.0.0.1:30000", 30_000, "info").replace(
         "generation_http = 8",
         "generation_http = 8\nspeech_batch = 3",
@@ -178,15 +178,7 @@ fn speech_batch_profile_maximum_must_fit_class_admission() {
     let config = format!(
         "{base}\n[http_media]\nroutes = [\"speech_batch\"]\ntrust_domain = \"local\"\nbuffered_request_max_bytes = 1048576\nstreamed_request_max_bytes = 16777216\nrequest_timeout_ms = 5000\n"
     );
-    assert!(load_bytes(config.as_bytes()).is_err());
-    assert!(
-        load_bytes(
-            config
-                .replace("speech_batch = 2", "speech_batch = 3")
-                .as_bytes()
-        )
-        .is_ok()
-    );
+    assert!(load_bytes(config.as_bytes()).is_ok());
 }
 
 #[test]
@@ -338,6 +330,7 @@ fn routing_schema_rejects_unknowns_invalid_bounds_and_profile_counterexamples() 
     );
     let cases = [
         base.replace("global = 128", "global = 0"),
+        base.replace("generation_http = 64", "generation_http = 129"),
         base.replace(
             "buffered_request_max_bytes = 1048576",
             "buffered_request_max_bytes = 0",

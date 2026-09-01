@@ -412,7 +412,6 @@ impl Config {
         self.validate_http()?;
         self.validate_http_generation()?;
         self.validate_http_media()?;
-        self.validate_speech_batch_admission()?;
         Ok(())
     }
 
@@ -627,42 +626,11 @@ impl Config {
                     "configured class limits must be between 1 and 65535",
                 ));
             }
-        }
-        Ok(())
-    }
-
-    fn validate_speech_batch_admission(&self) -> Result<(), ConfigError> {
-        let Some(media) = self
-            .http_media
-            .as_ref()
-            .filter(|media| media.routes.contains(&HttpMediaRoute::SpeechBatch))
-        else {
-            return Ok(());
-        };
-        let admission_limit = self.admission.speech_batch.ok_or_else(|| {
-            ConfigError::invalid(
-                "admission.speech_batch",
-                "is required while speech batch is enabled",
-            )
-        })?;
-        for worker in self
-            .workers
-            .iter()
-            .filter(|worker| worker.trust_domain == media.trust_domain)
-        {
-            for profile in &worker.service_profiles {
-                let crate::worker_pool::profile::ServiceProfile::SpeechBatch {
-                    max_batch_size, ..
-                } = profile
-                else {
-                    continue;
-                };
-                if u32::from(*max_batch_size) > admission_limit {
-                    return Err(ConfigError::invalid(
-                        "workers.service_profiles.max_batch_size",
-                        "must not exceed admission.speech_batch",
-                    ));
-                }
+            if limit > self.admission.global {
+                return Err(ConfigError::invalid(
+                    "admission",
+                    "configured class limits must not exceed admission.global",
+                ));
             }
         }
         Ok(())

@@ -245,6 +245,13 @@ async fn handle(
             Ok((upload, classified))
         })
         .await?;
+    if route == HttpMediaRoute::SpeechBatch
+        && !media
+            .pool
+            .supports_speech_batch_size(&media.trust, classified.credits)
+    {
+        return Err(HttpFault::NoCompatibleWorker);
+    }
     let admission = match admission {
         Some(admission) => admission,
         None => media

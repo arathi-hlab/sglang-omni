@@ -698,6 +698,27 @@ fn oversized_heterogeneous_request_is_rejected_without_upstream_send() {
 }
 
 #[test]
+fn speech_batch_above_every_worker_limit_is_not_capacity_pressure() {
+    let _guard = socket_guard();
+    let worker = Worker::start();
+    let router = RouterProcess::start(&[MediaRoute::SpeechBatch], &[(&worker, false)]);
+    let items = std::iter::repeat_n(r#"{"input":"x"}"#, 17)
+        .collect::<Vec<_>>()
+        .join(",");
+    let body = format!(r#"{{"model":"tts","items":[{items}]}}"#);
+    let response = request(
+        router.address,
+        "POST",
+        "/v1/audio/speech/batch",
+        Some("application/json"),
+        body.as_bytes(),
+    )
+    .expect("oversized batch response");
+    assert!(response.starts_with(b"HTTP/1.1 422"));
+    assert!(worker.captures().is_empty());
+}
+
+#[test]
 fn media_accepts_chunked_uploads_and_standard_continue() {
     let _guard = socket_guard();
     let first = Worker::start();
