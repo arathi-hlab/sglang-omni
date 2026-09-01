@@ -224,8 +224,16 @@ disabled. Request and response bodies use direct backpressure without a body
 pump, application queue, or extra relay task.
 
 The request deadline covers upload, connection establishment, and upstream
-response headers. After headers are committed, a stream ends on upstream EOF
-or error, downstream disconnect, or process drain.
+response headers. If a worker commits a response before consuming the complete
+upload, the upload remains bounded by the same deadline. After upload
+completion, the response has no total wall-clock limit.
+
+`http_generation.response_idle_timeout_ms` optionally limits the interval
+between upstream reads and resets after every successful read. Leave it omitted
+for no response-idle limit. When configured, choose a value that permits the
+longest valid delay before the first response bytes as well as between stream
+chunks. Responses still end normally on upstream EOF or error, downstream
+disconnect, or process drain.
 
 ## Media and Realtime Sessions
 
@@ -292,8 +300,9 @@ upgraded transports. Connection-level accept errors retry immediately; other
 accept errors are logged and retried after one second.
 
 On Unix, startup raises the `RLIMIT_NOFILE` soft limit toward the
-operator-controlled hard limit and verifies room for accepted sockets plus the
-listener.
+operator-controlled hard limit and verifies the configured listener, accepted
+client sockets, active upstream requests, pooled upstream connections, and
+worker health connections fit within it.
 
 The first `SIGINT` or `SIGTERM` closes admission, stops health work, drops the
 listener, and drains owned tasks. A distinct second signal or the drain
