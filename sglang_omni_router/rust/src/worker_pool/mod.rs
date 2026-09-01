@@ -924,7 +924,10 @@ mod tests {
             let lease = pool
                 .content_blind_generation_http(&trust)
                 .expect("homogeneous cohort")
-                .dispatch(pool.try_admit().expect("admit tied least requests"))
+                .dispatch(
+                    pool.try_admit(CapacityClass::GenerationHttp, 1)
+                        .expect("admit tied least requests"),
+                )
                 .expect("dispatch tied least requests");
             selected.push(lease.registration_ordinal());
             drop(lease);
