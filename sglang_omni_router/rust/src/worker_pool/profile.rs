@@ -222,9 +222,9 @@ impl ServiceProfile {
                     true,
                 )?;
                 validate_set(stream_modes, "workers.service_profiles.stream_modes", false)?;
-                if output_modalities.contains(&OutputModality::Audio)
-                    != !chat_audio_formats.is_empty()
-                {
+                let supports_audio = output_modalities.contains(&OutputModality::Audio);
+                let has_audio_formats = !chat_audio_formats.is_empty();
+                if supports_audio != has_audio_formats {
                     return Err(ConfigError::invalid(
                         "workers.service_profiles.chat_audio_formats",
                         "must be nonempty exactly when audio output is supported",
