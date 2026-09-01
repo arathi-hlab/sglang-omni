@@ -751,7 +751,7 @@ fn strict_envelopes_fail_before_dispatch_and_missing_ids_are_generated() {
 
     for (request, expected) in [
         (b"POST /v1/chat/completions?x=1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".as_slice(), 400),
-        (b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\n{}\r\n0\r\n\r\n".as_slice(), 400),
+        (b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\n{}\r\n0\r\n\r\n".as_slice(), 200),
     ] {
         let response = raw_request(router.address, request).expect("router envelope response");
         assert_eq!(status(&response), expected);
@@ -773,7 +773,7 @@ fn strict_envelopes_fail_before_dispatch_and_missing_ids_are_generated() {
         );
     }
     thread::sleep(Duration::from_millis(20));
-    assert_eq!(worker.captures().len(), 1);
+    assert_eq!(worker.captures().len(), 2);
 }
 
 #[test]

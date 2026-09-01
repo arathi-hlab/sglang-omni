@@ -9,7 +9,7 @@ use crate::error::HttpFault;
 use crate::request_id::REQUEST_ID_HEADER;
 
 pub(crate) struct RequestFraming {
-    pub(crate) content_length: u64,
+    pub(crate) content_length: Option<u64>,
 }
 
 pub(crate) fn validate_request(headers: &HeaderMap) -> Result<RequestFraming, HttpFault> {
@@ -43,17 +43,18 @@ pub(crate) fn validate_request(headers: &HeaderMap) -> Result<RequestFraming, Ht
     if headers.contains_key(TRAILER) {
         return Err(HttpFault::MalformedRequest);
     }
-    if headers.contains_key(TRANSFER_ENCODING) {
-        return Err(HttpFault::MalformedRequest);
-    }
+    let transfer_framed = headers.contains_key(TRANSFER_ENCODING);
     let mut content_lengths = headers.get_all(CONTENT_LENGTH).iter();
     let content_length = content_lengths.next();
-    if content_lengths.next().is_some() {
+    if content_lengths.next().is_some() || (transfer_framed && content_length.is_some()) {
         return Err(HttpFault::MalformedRequest);
     }
     let content_length = content_length
-        .and_then(parse_content_length)
-        .ok_or(HttpFault::MalformedRequest)?;
+        .map(|value| parse_content_length(value).ok_or(HttpFault::MalformedRequest))
+        .transpose()?;
+    if content_length.is_none() && !transfer_framed {
+        return Err(HttpFault::MalformedRequest);
+    }
     Ok(RequestFraming { content_length })
 }
 
@@ -287,13 +288,13 @@ mod tests {
     }
 
     #[test]
-    fn request_envelope_requires_fixed_identity_encoded_json() {
+    fn request_envelope_accepts_fixed_and_chunked_identity_encoded_json() {
         let headers = valid_request_headers();
         assert_eq!(
             validate_request(&headers)
                 .expect("valid fixed request")
                 .content_length,
-            12
+            Some(12)
         );
 
         for (name, value, fault) in [
@@ -303,7 +304,6 @@ mod tests {
                 "gzip",
                 HttpFault::UnsupportedContentEncoding,
             ),
-            (TRANSFER_ENCODING, "chunked", HttpFault::MalformedRequest),
         ] {
             let mut rejected = headers.clone();
             rejected.insert(name, HeaderValue::from_static(value));
@@ -313,6 +313,23 @@ mod tests {
         let mut identity = headers.clone();
         identity.insert(CONTENT_ENCODING, HeaderValue::from_static("identity"));
         assert!(validate_request(&identity).is_ok());
+
+        let mut chunked = headers.clone();
+        chunked.remove(CONTENT_LENGTH);
+        chunked.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+        assert_eq!(
+            validate_request(&chunked)
+                .expect("chunked request")
+                .content_length,
+            None
+        );
+
+        let mut conflicting = headers.clone();
+        conflicting.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+        assert_eq!(
+            validate_request(&conflicting).err(),
+            Some(HttpFault::MalformedRequest)
+        );
 
         let mut missing_length = headers;
         missing_length.remove(CONTENT_LENGTH);
