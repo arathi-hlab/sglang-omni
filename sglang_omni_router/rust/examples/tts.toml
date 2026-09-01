@@ -25,7 +25,6 @@ interval_ms = 5000
 timeout_ms = 5000
 success_threshold = 2
 failure_threshold = 3
-max_concurrent_probes = 16
 
 [http]
 buffered_request_total_bytes = 268435456

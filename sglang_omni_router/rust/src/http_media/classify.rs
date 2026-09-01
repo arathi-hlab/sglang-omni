@@ -530,7 +530,6 @@ interval_ms = 100
 timeout_ms = 50
 success_threshold = 1
 failure_threshold = 1
-max_concurrent_probes = 1
 [http]
 buffered_request_total_bytes = 4096
 connect_timeout_ms = 100
