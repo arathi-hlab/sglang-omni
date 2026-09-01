@@ -47,7 +47,6 @@ pub(crate) struct HttpGenerationConfig {
     pub(crate) streamed_request_max_bytes: u64,
     connect_timeout_ms: u64,
     request_timeout_ms: u64,
-    response_idle_timeout_ms: Option<u64>,
     pool_idle_timeout_ms: u64,
     pub(crate) pool_max_idle_per_host: usize,
 }
@@ -59,7 +58,6 @@ impl Default for HttpGenerationConfig {
             streamed_request_max_bytes: DEFAULT_STREAMED_REQUEST_MAX_BYTES,
             connect_timeout_ms: DEFAULT_CONNECT_TIMEOUT_MS,
             request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
-            response_idle_timeout_ms: None,
             pool_idle_timeout_ms: DEFAULT_POOL_IDLE_TIMEOUT_MS,
             pool_max_idle_per_host: DEFAULT_POOL_MAX_IDLE_PER_HOST,
         }
@@ -73,10 +71,6 @@ impl HttpGenerationConfig {
 
     pub(crate) const fn request_timeout(&self) -> Duration {
         Duration::from_millis(self.request_timeout_ms)
-    }
-
-    pub(crate) fn response_idle_timeout(&self) -> Option<Duration> {
-        self.response_idle_timeout_ms.map(Duration::from_millis)
     }
 
     pub(crate) const fn pool_idle_timeout(&self) -> Duration {
@@ -306,17 +300,6 @@ impl Config {
             return Err(ConfigError::invalid(
                 "http_generation.request_timeout_ms",
                 "must be at least connect_timeout_ms and at most 3600000",
-            ));
-        }
-        if generation.response_idle_timeout_ms.is_some_and(|timeout| {
-            timeout == 0
-                || tokio::time::Instant::now()
-                    .checked_add(Duration::from_millis(timeout))
-                    .is_none()
-        }) {
-            return Err(ConfigError::invalid(
-                "http_generation.response_idle_timeout_ms",
-                "must be greater than zero and representable by the monotonic clock",
             ));
         }
         if !(1_000..=300_000).contains(&generation.pool_idle_timeout_ms) {

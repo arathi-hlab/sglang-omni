@@ -26,7 +26,6 @@ pub(crate) struct HttpGeneration {
     trust: TrustDomain,
     streamed_max: u64,
     request_timeout: std::time::Duration,
-    response_idle_timeout: Option<std::time::Duration>,
 }
 
 impl HttpGeneration {
@@ -39,7 +38,6 @@ impl HttpGeneration {
             trust: TrustDomain::new(http_generation.trust_domain.clone()),
             streamed_max: http_generation.streamed_request_max_bytes,
             request_timeout: http_generation.request_timeout(),
-            response_idle_timeout: http_generation.response_idle_timeout(),
         }))
     }
 
@@ -180,13 +178,7 @@ async fn send_once(
             return Err(fault);
         }
     };
-    let relay = DirectResponseBody::new(
-        body,
-        lease,
-        outgoing.upload,
-        deadline,
-        generation.response_idle_timeout,
-    );
+    let relay = DirectResponseBody::new(body, lease, outgoing.upload, deadline);
     let mut downstream = Response::new(Body::new(relay));
     *downstream.status_mut() = parts.status;
     *downstream.headers_mut() = headers;
