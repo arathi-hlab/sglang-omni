@@ -49,6 +49,10 @@ def test_fuse_vocoder_decoder_keeps_originals_on_prewarm_failure(
     assert decoder[1][0] is second
 
 
+@pytest.mark.accelerator
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="fused SnakeBeta parity needs CUDA"
+)
 @pytest.mark.parametrize(
     ("batch", "channels", "frames"),
     [
@@ -64,8 +68,9 @@ def test_fused_snake_beta_cuda_parity_uses_kernel(
     channels: int,
     frames: int,
 ) -> None:
-    if not torch.cuda.is_available() or not vocoder_kernels._HAS_TRITON:
-        pytest.skip("CUDA and Triton are required")
+    # note (db-ol): on the accelerator runner a missing Triton must fail
+    # loudly, a skip here would hide the kernel from CI again.
+    assert vocoder_kernels._HAS_TRITON, "Triton is required on accelerator CI"
 
     torch.manual_seed(0)
     device = torch.device("cuda")
