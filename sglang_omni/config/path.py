@@ -476,6 +476,15 @@ def _descend(container: Any, part: str, *, raw: str, prefix: str) -> Segment:
                 raw=raw,
                 resolved_prefix=prefix,
             )
+        if part == "audio_chunking" and _is_chunkless_pipeline(core):
+            raise ConfigPathError(
+                f"{core.__name__} does not support audio chunking: the "
+                "audio_chunking policy only exists on pipelines whose model "
+                "declares allow_audio_chunking, so there is nothing for "
+                "these settings to reach here",
+                raw=raw,
+                resolved_prefix=prefix,
+            )
         if part in fields:
             annotation = fields[part].annotation
             if fields[part].metadata:
@@ -648,6 +657,15 @@ def _is_non_engine_stage(annotation: Any) -> bool:
         and get_origin(annotation) is None
         and issubclass(annotation, StageConfig)
         and not annotation.engine_stage
+    )
+
+
+def _is_chunkless_pipeline(annotation: Any) -> bool:
+    return (
+        isinstance(annotation, type)
+        and get_origin(annotation) is None
+        and issubclass(annotation, PipelineConfig)
+        and not annotation.allow_audio_chunking
     )
 
 

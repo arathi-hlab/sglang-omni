@@ -7,6 +7,7 @@ import pytest
 
 from sglang_omni.config import PipelineConfig
 from sglang_omni.config.manager import ConfigManager
+from sglang_omni.config.path import ConfigPathError
 from sglang_omni.config.runtime import (
     apply_typed_stage_kwargs,
     resolve_factory_signature_args,
@@ -14,6 +15,7 @@ from sglang_omni.config.runtime import (
     resolve_stage_factory_kwargs,
     resolve_stage_typed_kwargs,
 )
+from sglang_omni.models.higgs_tts.config import HiggsTtsPipelineConfig
 from sglang_omni.models.qwen3_asr.config import Qwen3ASRPipelineConfig
 from sglang_omni.models.whisper_asr.config import WhisperASRPipelineConfig
 from sglang_omni.utils.imports import import_string
@@ -66,6 +68,15 @@ def test_clip_length_past_the_native_limit_is_rejected():
     manager = ConfigManager(WhisperASRPipelineConfig(model_path="dummy"))
     with pytest.raises(ValueError, match="native clip limit"):
         manager.merge_config({"audio_chunking.max_audio_clip_s": "60"})
+
+
+def test_chunkless_pipelines_reject_the_audio_chunking_path():
+    # Note (Jeffro): same treatment as engine.* on a non-engine stage: the
+    # policy has nothing to reach on a pipeline that never chunks, so the
+    # path does not compile at all.
+    manager = ConfigManager(HiggsTtsPipelineConfig(model_path="dummy"))
+    with pytest.raises(ConfigPathError, match="does not support audio chunking"):
+        manager.merge_config({"audio_chunking.max_concurrent_chunks": "16"})
 
 
 def test_clip_length_below_the_minimum_useful_length_is_rejected():
