@@ -19,18 +19,50 @@ THINKER_STAGE = "thinker"
 
 
 def _preprocessing_stage(*, process: str) -> StageConfig:
-    # Encoder stages join in Phase 2; until then preprocessing feeds
-    # mm_aggregate directly and the multi-branch route_fn stays unused.
     return StageConfig(
         name="preprocessing",
         process=process,
         factory_path=f"{_PKG}.stages.create_preprocessing_executor",
         factory=FactoryArgs(max_seq_len=8192),
-        next="mm_aggregate",
+        next=["image_encoder", "audio_encoder", "mm_aggregate"],
+        route_fn=f"{_PKG}.request_builders.resolve_preprocessing_next_stages",
         project_payload={
+            "image_encoder": (
+                f"{_PKG}.request_builders.project_preprocessing_to_image_encoder"
+            ),
+            "audio_encoder": (
+                f"{_PKG}.request_builders.project_preprocessing_to_audio_encoder"
+            ),
             "mm_aggregate": (
                 f"{_PKG}.request_builders.project_preprocessing_to_mm_aggregate"
             ),
+        },
+    )
+
+
+def _image_encoder_stage(*, gpu: int, process: str) -> StageConfig:
+    return StageConfig(
+        name="image_encoder",
+        process=process,
+        factory_path=f"{_PKG}.stages.create_image_encoder_executor",
+        gpu=gpu,
+        next="mm_aggregate",
+        project_payload={
+            "mm_aggregate": f"{_PKG}.request_builders.project_encoder_to_mm_aggregate"
+        },
+    )
+
+
+def _audio_encoder_stage(*, gpu: int, process: str) -> StageConfig:
+    return StageConfig(
+        name="audio_encoder",
+        process=process,
+        factory_path=f"{_PKG}.stages.create_audio_encoder_executor",
+        gpu=gpu,
+        disable_direct_cuda_ipc_payload=True,
+        next="mm_aggregate",
+        project_payload={
+            "mm_aggregate": f"{_PKG}.request_builders.project_encoder_to_mm_aggregate"
         },
     )
 
@@ -41,7 +73,8 @@ def _aggregate_stage(*, process: str, gpu: int) -> StageConfig:
         process=process,
         factory_path=f"{_PKG}.stages.create_aggregate_executor",
         gpu=gpu,
-        wait_for=["preprocessing"],
+        wait_for=["preprocessing", "image_encoder", "audio_encoder"],
+        wait_for_fn=f"{_PKG}.request_builders.resolve_mm_aggregate_wait_sources",
         merge_fn=f"{_PKG}.merge.merge_for_thinker",
         next="thinker",
         disable_direct_cuda_ipc_payload=True,
@@ -73,11 +106,11 @@ def _decode_stage(*, process: str) -> StageConfig:
     )
 
 
-def _text_stages() -> list[StageConfig]:
-    # image_encoder / audio_encoder stages join in Phase 2; until then the
-    # preprocessing route_fn never selects them for text-only requests.
+def _default_stages() -> list[StageConfig]:
     return [
         _preprocessing_stage(process="pipeline"),
+        _image_encoder_stage(process="pipeline", gpu=0),
+        _audio_encoder_stage(process="pipeline", gpu=0),
         _aggregate_stage(process="pipeline", gpu=0),
         _thinker_stage(gpu=0, process="pipeline"),
         _decode_stage(process="pipeline"),
@@ -85,7 +118,8 @@ def _text_stages() -> list[StageConfig]:
 
 
 class MiniCPMOPipelineConfig(PipelineConfig):
-    """Text-only pipeline: preprocessing → mm_aggregate → thinker → decode."""
+    """Thinker pipeline: preprocessing → [image/audio encoders] → mm_aggregate
+    → thinker → decode."""
 
     architecture: ClassVar[str] = "MiniCPMO"
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
@@ -93,7 +127,7 @@ class MiniCPMOPipelineConfig(PipelineConfig):
     }
 
     model_path: str
-    stages: list[StageConfig] = Field(default_factory=_text_stages)
+    stages: list[StageConfig] = Field(default_factory=_default_stages)
 
 
 EntryClass = MiniCPMOPipelineConfig

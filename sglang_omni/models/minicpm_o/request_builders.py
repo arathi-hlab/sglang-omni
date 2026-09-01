@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import torch
+import xxhash
 
 from sglang_omni.models.minicpm_o.payload_types import (
     MiniCPMOPipelineState,
@@ -184,8 +186,110 @@ def _has_encoder_model_input(stage_name: str, stage_inputs: Any) -> bool:
     if stage_name == IMAGE_STAGE:
         return stage_inputs.get("pixel_values") is not None
     if stage_name == AUDIO_STAGE:
-        return stage_inputs.get("input_features") is not None
+        return stage_inputs.get("audio_features") is not None
     return False
+
+
+# ---------------------------------------------------------------------------
+# Encoder request builders
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EncoderRequestData:
+    """Prepared inputs for one encoder stage forward."""
+
+    model_inputs: dict[str, Any]
+    cache_key: str | None = None
+    skip_result: dict[str, Any] | None = None
+
+
+def build_encoder_request(
+    state: MiniCPMOPipelineState, *, stage_name: str
+) -> EncoderRequestData:
+    inputs = state.encoder_inputs.get(stage_name)
+    if not isinstance(inputs, dict) or not inputs:
+        return EncoderRequestData(model_inputs={}, skip_result={})
+    if inputs.get("_skip"):
+        skip_result = inputs.get("_result")
+        return EncoderRequestData(
+            model_inputs={},
+            skip_result=skip_result if isinstance(skip_result, dict) else {},
+        )
+    cache_key = inputs.get("cache_key")
+    model_inputs = {
+        k: v for k, v in inputs.items() if k not in ("cache_key", "_active")
+    }
+    return EncoderRequestData(
+        model_inputs=model_inputs,
+        cache_key=str(cache_key) if cache_key is not None else None,
+    )
+
+
+def apply_encoder_result(
+    state: MiniCPMOPipelineState,
+    *,
+    stage_name: str,
+    result: Any,
+) -> None:
+    encoder_out = result if isinstance(result, dict) else {"result": result}
+    state.encoder_outs[stage_name] = encoder_out
+    state.engine_outputs[stage_name] = encoder_out
+
+
+def _bounds_to_positions(bounds: Any, device: Any = None) -> torch.Tensor | None:
+    """Flatten ``(N, 2)`` [start, end) bound rows into a 1D position tensor."""
+    if not isinstance(bounds, torch.Tensor) or bounds.numel() == 0:
+        return None
+    return torch.cat(
+        [torch.arange(int(r[0]), int(r[1]), device=device) for r in bounds]
+    )
+
+
+def _apply_mm_pad_values(
+    input_ids: torch.Tensor,
+    *,
+    mm_inputs: dict[str, Any],
+    model_inputs: dict[str, Any],
+    vocab_size: int,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor] | None]:
+    """Rewrite placeholder ``<unk>`` runs to per-modality pad values.
+
+    MiniCPM-o marks all placeholders with the same ``<unk>`` token; the
+    ``image_bound`` / ``audio_bounds`` intervals disambiguate modalities. The
+    base thinker runner injects embeddings by matching ``pad_values``, so we
+    rewrite the ids inside each modality's intervals to a cache-key-derived
+    pad value and record the positions.
+    """
+    pad_values: dict[str, int] = {}
+    empty = torch.empty(0, dtype=torch.long)
+    # The base runner iterates image/video/audio unconditionally, so every
+    # modality needs a positions entry even when absent from the prompt.
+    mm_positions: dict[str, torch.Tensor] = {
+        "image": empty,
+        "video": empty,
+        "audio": empty,
+    }
+    has_any = False
+    input_ids = input_ids.clone()
+    for modality in ("image", "audio"):
+        info = mm_inputs.get(modality)
+        if not isinstance(info, dict):
+            continue
+        positions = _bounds_to_positions(info.get("bounds"))
+        if positions is None:
+            continue
+        has_any = True
+        cache_key = str(info.get("cache_key") or modality)
+        h = xxhash.xxh3_64(cache_key.encode()).intdigest()
+        pad_val = vocab_size + h % (1 << 62)
+        pad_values[modality] = pad_val
+        input_ids[positions] = pad_val
+        mm_positions[modality] = positions
+    if not has_any:
+        return input_ids, None
+    model_inputs["pad_values"] = pad_values
+    return input_ids, mm_positions
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +310,8 @@ def build_sglang_thinker_request(
     Constructs a SGLang Req with normalized SamplingParams, then wraps it in
     SGLangARRequestData. MiniCPM-o uses plain 1D RoPE, so no
     multimodal_inputs/mrope positions get attached; multimodal embeddings are
-    injected in the model runner via ``req.omni_model_inputs``.
+    injected in the model runner via ``req.omni_model_inputs`` at the
+    placeholder positions derived from ``image_bound`` / ``audio_bounds``.
     """
     from sglang.srt.managers.schedule_batch import Req
     from sglang.srt.sampling.sampling_params import SamplingParams
@@ -242,6 +347,14 @@ def build_sglang_thinker_request(
     sampling_params.verify(vocab_size)
 
     input_ids = input_ids.to(dtype=torch.long)
+    mm_positions = None
+    if model_inputs:
+        input_ids, mm_positions = _apply_mm_pad_values(
+            input_ids,
+            mm_inputs=state.mm_inputs,
+            model_inputs=model_inputs,
+            vocab_size=vocab_size,
+        )
     req = Req(
         rid=request_id or "req-0",
         origin_input_text="",
@@ -254,7 +367,7 @@ def build_sglang_thinker_request(
     req.omni_model_inputs = model_inputs if model_inputs else None
     req._omni_consumed = None
     req._codec_suppress_tokens = None
-    req._omni_mm_positions = None
+    req._omni_mm_positions = mm_positions
 
     data = SGLangARRequestData(
         input_ids=input_ids,

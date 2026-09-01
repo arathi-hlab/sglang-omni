@@ -44,6 +44,95 @@ def create_aggregate_executor():
     return SimpleScheduler(_identity)
 
 
+ENCODER_CACHE_MAX_ENTRIES = 64
+ENCODER_CACHE_MAX_BYTES = 4 * 1024**3
+
+
+def _run_single_encoder_payload(
+    payload: StagePayload,
+    *,
+    stage_name: str,
+    model: Any,
+    cache: Any,
+) -> StagePayload:
+    import torch
+
+    from sglang_omni.models.minicpm_o.payload_types import MiniCPMOPipelineState
+    from sglang_omni.models.minicpm_o.request_builders import (
+        apply_encoder_result,
+        build_encoder_request,
+    )
+
+    state = MiniCPMOPipelineState.from_dict(payload.data)
+    request = build_encoder_request(state, stage_name=stage_name)
+    if request.skip_result is not None:
+        result = request.skip_result
+    else:
+        result = None
+        if cache is not None and request.cache_key is not None:
+            result = cache.get(request.cache_key)
+        if result is None:
+            with torch.no_grad():
+                result = model(**request.model_inputs)
+            if cache is not None and request.cache_key is not None:
+                cache.put(request.cache_key, result)
+    apply_encoder_result(state, stage_name=stage_name, result=result)
+    payload.data = state.to_dict()
+    return payload
+
+
+def _create_encoder_executor(model: Any, *, stage_name: str):
+    from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+    from sglang_omni.scheduling.stage_cache import StageOutputCache
+
+    cache = StageOutputCache(
+        max_size=ENCODER_CACHE_MAX_ENTRIES,
+        max_bytes=ENCODER_CACHE_MAX_BYTES,
+        cache_device="cpu",
+    )
+
+    def _encode(payload: StagePayload) -> StagePayload:
+        return _run_single_encoder_payload(
+            payload, stage_name=stage_name, model=model, cache=cache
+        )
+
+    return SimpleScheduler(_encode)
+
+
+def create_image_encoder_executor(
+    model_path: str,
+    *,
+    device: str | None = None,
+    dtype: str | None = None,
+):
+    from sglang_omni.models.minicpm_o.components.image_encoder import (
+        MiniCPMOImageEncoder,
+    )
+    from sglang_omni.utils.device import resolve_device_spec
+
+    model = MiniCPMOImageEncoder(
+        model_path, device=resolve_device_spec(device), dtype=dtype
+    )
+    return _create_encoder_executor(model, stage_name="image_encoder")
+
+
+def create_audio_encoder_executor(
+    model_path: str,
+    *,
+    device: str | None = None,
+    dtype: str | None = None,
+):
+    from sglang_omni.models.minicpm_o.components.audio_encoder import (
+        MiniCPMOAudioEncoder,
+    )
+    from sglang_omni.utils.device import resolve_device_spec
+
+    model = MiniCPMOAudioEncoder(
+        model_path, device=resolve_device_spec(device), dtype=dtype
+    )
+    return _create_encoder_executor(model, stage_name="audio_encoder")
+
+
 def create_decode_executor(model_path: str):
     # State keys deliberately mirror qwen3_omni, so its streaming text
     # detokenizer applies unchanged.
