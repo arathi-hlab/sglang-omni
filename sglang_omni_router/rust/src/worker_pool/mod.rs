@@ -4,7 +4,7 @@ pub(crate) mod profile;
 mod resolver;
 mod selection;
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use tokio::sync::{Notify, Semaphore};
 
@@ -15,7 +15,7 @@ pub(crate) use health::{HealthSupervisor, WorkerHealth};
 pub(crate) use profile::TrustDomain;
 pub(crate) use resolver::ResolvedTarget;
 
-use admission::{AdmissionController, AdmissionGate};
+use admission::AdmissionController;
 use health::AtomicHealth;
 use profile::{
     MAX_WORKERS, RegistrationId, ServiceProfile, WorkerCapacityConfig, WorkerId,
@@ -57,7 +57,6 @@ impl WorkerRecord {
 /// deterministic policy state, and independently owned health.
 pub(crate) struct WorkerPool {
     records: Vec<Arc<WorkerRecord>>,
-    gate: Arc<RwLock<AdmissionGate>>,
     admission: AdmissionController,
     selector: Selector,
     homogeneous_generation_http: Vec<HomogeneousGenerationCohort>,
@@ -91,9 +90,7 @@ impl WorkerPool {
             config.http_generation.pool_max_idle_per_host,
         )
         .map_err(crate::error::RouterError::GenerationClient)?;
-        let gate = Arc::new(RwLock::new(AdmissionGate::open()));
         let admission = AdmissionController::new(
-            Arc::clone(&gate),
             usize::try_from(config.admission.global)
                 .map_err(|_| crate::error::RouterError::WorkerPoolInvariant)?,
             usize::try_from(config.admission.generation_http)
@@ -116,7 +113,6 @@ impl WorkerPool {
         let homogeneous_generation_http = build_content_blind_generation_cohorts(&records);
         Ok(Self {
             records,
-            gate,
             admission,
             selector: Selector::new(config.router.strategy),
             homogeneous_generation_http,
@@ -157,10 +153,6 @@ impl WorkerPool {
             return Err(DispatchError::Unavailable);
         }
         let policy_guard = self.selector.least_requests_guard();
-        let gate = self.gate.read().map_err(|_| DispatchError::Internal)?;
-        if !gate.accepting {
-            return Err(DispatchError::Draining);
-        }
         let selected = match self.selector.strategy() {
             RoutingStrategy::RoundRobin => {
                 let start = self.selector.start(eligible_count);
@@ -168,7 +160,6 @@ impl WorkerPool {
             }
             RoutingStrategy::LeastRequests => self.reserve_least_requests(&matches),
         };
-        drop(gate);
         drop(policy_guard);
         match selected {
             Some((record, exact)) => Ok(RequestLease::new(admission, exact, record)),
@@ -278,26 +269,13 @@ impl WorkerPool {
     }
 
     pub(crate) fn generation_http_ready(&self, trust: &TrustDomain) -> bool {
-        self.gate.read().is_ok_and(|gate| {
-            gate.accepting
-                && self
-                    .records
-                    .iter()
-                    .any(|record| &record.trust_domain == trust && record.is_routable())
-        })
+        self.records
+            .iter()
+            .any(|record| &record.trust_domain == trust && record.is_routable())
     }
 
-    pub(crate) fn drain(&self) -> Result<(), DispatchError> {
-        let mut gate = self.gate.write().map_err(|_| DispatchError::Internal)?;
-        if !gate.accepting {
-            return Ok(());
-        }
-        gate.accepting = false;
+    pub(crate) fn drain(&self) {
         self.admission.close();
-        for record in &self.records {
-            record.capacity.semaphore.close();
-        }
-        Ok(())
     }
 }
 
@@ -351,7 +329,7 @@ fn build_capacity(
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use std::sync::{Arc, Barrier, RwLock};
+    use std::sync::{Arc, Barrier};
     use std::thread;
 
     use super::profile::{
@@ -410,7 +388,6 @@ mod tests {
         records: Vec<Arc<WorkerRecord>>,
         admission: usize,
     ) -> WorkerPool {
-        let gate = Arc::new(RwLock::new(AdmissionGate::open()));
         let client = build_health_client(
             std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(1),
@@ -419,8 +396,7 @@ mod tests {
         WorkerPool {
             homogeneous_generation_http: build_content_blind_generation_cohorts(&records),
             records,
-            gate: Arc::clone(&gate),
-            admission: AdmissionController::new(gate, admission, admission),
+            admission: AdmissionController::new(admission, admission),
             selector: Selector::new(strategy),
             health_client: client.clone(),
             generation_client: client,
@@ -664,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn readiness_tracks_worker_health_and_router_admission() {
+    fn readiness_tracks_worker_health() {
         let record = record(0, "local", "omni", 1);
         record.health.store(WorkerHealth::Unknown);
         let pool = pool(RoutingStrategy::RoundRobin, vec![Arc::clone(&record)], 1);
@@ -672,7 +648,26 @@ mod tests {
         assert!(!pool.generation_http_ready(&trust));
         record.health.store(WorkerHealth::Healthy);
         assert!(pool.generation_http_ready(&trust));
-        pool.drain().expect("drain pool");
-        assert!(!pool.generation_http_ready(&trust));
+    }
+
+    #[test]
+    fn drain_rejects_new_admission_and_preserves_admitted_work() {
+        let pool = pool(
+            RoutingStrategy::RoundRobin,
+            vec![record(0, "local", "omni", 1)],
+            1,
+        );
+        let trust = TrustDomain::new(String::from("local"));
+        let admission = pool.try_admit().expect("admit before drain");
+
+        pool.drain();
+
+        assert!(matches!(pool.try_admit(), Err(AdmissionError::Draining)));
+        let lease = pool
+            .content_blind_generation_http(&trust)
+            .expect("homogeneous cohort")
+            .dispatch(admission)
+            .expect("admitted request may dispatch during drain");
+        drop(lease);
     }
 }

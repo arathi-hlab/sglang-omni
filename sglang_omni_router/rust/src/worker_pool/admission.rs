@@ -1,21 +1,9 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use thiserror::Error;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 use super::{ResolvedTarget, WorkerRecord};
-
-/// One read/write gate linearizes fail-fast admission and exact reservation
-/// against process drain. No guard crosses an await point.
-pub(super) struct AdmissionGate {
-    pub(super) accepting: bool,
-}
-
-impl AdmissionGate {
-    pub(super) const fn open() -> Self {
-        Self { accepting: true }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub(crate) enum AdmissionError {
@@ -23,8 +11,6 @@ pub(crate) enum AdmissionError {
     Draining,
     #[error("router admission is full")]
     Overloaded,
-    #[error("router admission invariant failed")]
-    Internal,
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
@@ -33,10 +19,6 @@ pub(crate) enum DispatchError {
     Unavailable,
     #[error("matching worker capacity is full")]
     Overloaded,
-    #[error("router is draining")]
-    Draining,
-    #[error("router dispatch invariant failed")]
-    Internal,
 }
 
 /// Global and generation-class ingress ownership, released exactly once.
@@ -80,32 +62,28 @@ impl RequestLease {
 }
 
 pub(super) struct AdmissionController {
-    gate: Arc<RwLock<AdmissionGate>>,
     global: Arc<Semaphore>,
     generation: Arc<Semaphore>,
 }
 
 impl AdmissionController {
-    pub(super) fn new(gate: Arc<RwLock<AdmissionGate>>, global: usize, generation: usize) -> Self {
+    pub(super) fn new(global: usize, generation: usize) -> Self {
         Self {
-            gate,
             global: Arc::new(Semaphore::new(global)),
             generation: Arc::new(Semaphore::new(generation)),
         }
     }
 
     pub(super) fn try_admit(&self) -> Result<AdmissionLease, AdmissionError> {
-        let gate = self.gate.read().map_err(|_| AdmissionError::Internal)?;
-        if !gate.accepting {
-            return Err(AdmissionError::Draining);
-        }
         let global = Arc::clone(&self.global)
             .try_acquire_owned()
-            .map_err(|_| AdmissionError::Overloaded)?;
+            .map_err(|error| match error {
+                TryAcquireError::Closed => AdmissionError::Draining,
+                TryAcquireError::NoPermits => AdmissionError::Overloaded,
+            })?;
         let generation = Arc::clone(&self.generation)
             .try_acquire_owned()
             .map_err(|_| AdmissionError::Overloaded)?;
-        drop(gate);
         Ok(AdmissionLease {
             _generation: generation,
             _global: global,
@@ -114,7 +92,6 @@ impl AdmissionController {
 
     pub(super) fn close(&self) {
         self.global.close();
-        self.generation.close();
     }
 
     #[cfg(test)]

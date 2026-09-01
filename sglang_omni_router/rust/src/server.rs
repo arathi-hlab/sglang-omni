@@ -97,7 +97,7 @@ pub(crate) async fn serve(config: Config) -> Result<(), RouterError> {
         },
     };
 
-    if lifecycle.enter_draining().is_err() || pool.drain().is_err() {
+    if lifecycle.enter_draining().is_err() {
         return Err(finalize_failure(
             &lifecycle,
             Some(&mut server_task),
@@ -106,6 +106,7 @@ pub(crate) async fn serve(config: Config) -> Result<(), RouterError> {
         )
         .await);
     }
+    pool.drain();
     health.cancel();
     info!(state = "draining", reason = ?first_signal, "graceful shutdown started");
     if shutdown_sender.send(()).is_err() {

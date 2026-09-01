@@ -262,15 +262,13 @@ const fn map_admission(error: AdmissionError) -> HttpFault {
     match error {
         AdmissionError::Draining => HttpFault::RouterUnavailable,
         AdmissionError::Overloaded => HttpFault::RouterOverloaded,
-        AdmissionError::Internal => HttpFault::InternalError,
     }
 }
 
 const fn map_dispatch(error: DispatchError) -> HttpFault {
     match error {
-        DispatchError::Unavailable | DispatchError::Draining => HttpFault::RouterUnavailable,
+        DispatchError::Unavailable => HttpFault::RouterUnavailable,
         DispatchError::Overloaded => HttpFault::RouterOverloaded,
-        DispatchError::Internal => HttpFault::InternalError,
     }
 }
 
