@@ -224,6 +224,10 @@ fn routing_schema_rejects_unknowns_invalid_bounds_and_profile_counterexamples() 
             "streamed_request_max_bytes = 0",
         ),
         base.replace("connect_timeout_ms = 1000", "connect_timeout_ms = 0"),
+        base.replace(
+            "request_timeout_ms = 5000",
+            "request_timeout_ms = 5000\nresponse_idle_timeout_ms = 0",
+        ),
         base.replace("pool_max_idle_per_host = 8", "pool_max_idle_per_host = 0"),
         base.replace(
             "pool_max_idle_per_host = 8",

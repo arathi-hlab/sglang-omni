@@ -73,11 +73,11 @@ pub(super) fn build_health_client(
 
 pub(super) fn build_generation_client(
     connect_timeout: Duration,
+    response_idle_timeout: Option<Duration>,
     pool_idle_timeout: Duration,
     pool_max_idle_per_host: usize,
 ) -> Result<Client, reqwest::Error> {
-    // A total or read timeout would terminate a valid stream after response commitment.
-    Client::builder()
+    let mut builder = Client::builder()
         .no_proxy()
         .redirect(Policy::none())
         .retry(reqwest::retry::never())
@@ -88,14 +88,22 @@ pub(super) fn build_generation_client(
         .no_gzip()
         .no_brotli()
         .no_zstd()
-        .no_deflate()
-        .build()
+        .no_deflate();
+    if let Some(timeout) = response_idle_timeout {
+        builder = builder.read_timeout(timeout);
+    }
+    builder.build()
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::ResolvedTarget;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::{ResolvedTarget, build_generation_client};
 
     #[test]
     fn worker_origins_are_strict_and_dns_names_are_valid() {
@@ -122,5 +130,88 @@ mod tests {
 
         assert!(ResolvedTarget::from_parts("https://127.0.0.1/", "/health").is_some());
         assert!(ResolvedTarget::from_parts("http://[::1]:18080/", "/health").is_some());
+    }
+
+    #[tokio::test]
+    async fn configured_response_idle_timeout_bounds_each_upstream_read() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind idle-response fixture");
+        let address = listener.local_addr().expect("read idle-response address");
+        let server = thread::spawn(move || {
+            let (mut stream, _peer) = listener.accept().expect("accept idle-response client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .expect("bound request-head read");
+            let mut request = [0_u8; 1024];
+            let _count = stream.read(&mut request).expect("read request head");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+                )
+                .expect("write response head");
+            thread::sleep(Duration::from_millis(200));
+        });
+        let client = build_generation_client(
+            Duration::from_secs(1),
+            Some(Duration::from_millis(50)),
+            Duration::from_secs(30),
+            1,
+        )
+        .expect("build generation client");
+        let response = client
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .expect("receive response head");
+        let error = response
+            .bytes()
+            .await
+            .expect_err("idle response body must time out");
+        assert!(error.is_timeout());
+        server.join().expect("join idle-response fixture");
+    }
+
+    #[tokio::test]
+    async fn response_activity_resets_the_configured_idle_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind active-response fixture");
+        let address = listener.local_addr().expect("read active-response address");
+        let server = thread::spawn(move || {
+            let (mut stream, _peer) = listener.accept().expect("accept active-response client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .expect("bound request-head read");
+            let mut request = [0_u8; 1024];
+            let _count = stream.read(&mut request).expect("read request head");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+                )
+                .expect("write response head");
+            for chunk in [b"1\r\na\r\n".as_slice(), b"1\r\nb\r\n", b"1\r\nc\r\n"] {
+                thread::sleep(Duration::from_millis(100));
+                stream
+                    .write_all(chunk)
+                    .expect("write active response chunk");
+            }
+            stream
+                .write_all(b"0\r\n\r\n")
+                .expect("finish active response");
+        });
+        let client = build_generation_client(
+            Duration::from_secs(1),
+            Some(Duration::from_millis(250)),
+            Duration::from_secs(30),
+            1,
+        )
+        .expect("build generation client");
+        let body = client
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .expect("receive response head")
+            .bytes()
+            .await
+            .expect("active response must outlive one idle interval");
+        assert_eq!(body.as_ref(), b"abc");
+        server.join().expect("join active-response fixture");
     }
 }
