@@ -228,12 +228,12 @@ response headers. If a worker commits a response before consuming the complete
 upload, the upload remains bounded by the same deadline. After upload
 completion, the response has no total wall-clock limit.
 
-`http_generation.response_idle_timeout_ms` optionally limits the interval
-between upstream reads and resets after every successful read. Leave it omitted
-for no response-idle limit. When configured, choose a value that permits the
-longest valid delay before the first response bytes as well as between stream
-chunks. Responses still end normally on upstream EOF or error, downstream
-disconnect, or process drain.
+After the upload completes, `http_generation.response_idle_timeout_ms`
+optionally limits the interval between upstream response frames and resets
+after every frame. Leave it omitted for no response-idle limit. When configured,
+choose a value that permits the longest valid delay between response frames.
+Responses still end normally on upstream EOF or error, downstream disconnect,
+or process drain.
 
 ## Media and Realtime Sessions
 

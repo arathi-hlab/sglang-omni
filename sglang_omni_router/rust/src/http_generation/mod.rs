@@ -2,7 +2,7 @@ mod headers;
 mod request_body;
 mod response_body;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Extension, State};
@@ -26,6 +26,7 @@ pub(crate) struct HttpGeneration {
     trust: TrustDomain,
     streamed_max: u64,
     request_timeout: std::time::Duration,
+    response_idle_timeout: Option<std::time::Duration>,
 }
 
 impl HttpGeneration {
@@ -38,6 +39,7 @@ impl HttpGeneration {
             trust: TrustDomain::new(http_generation.trust_domain.clone()),
             streamed_max: http_generation.streamed_request_max_bytes,
             request_timeout: http_generation.request_timeout(),
+            response_idle_timeout: http_generation.response_idle_timeout(),
         }))
     }
 
@@ -101,8 +103,8 @@ async fn relay_direct(
     request_id: HeaderValue,
     deadline: tokio::time::Instant,
 ) -> Result<Response<Body>, HttpFault> {
-    let state: SharedUploadState = Arc::new(Mutex::new(UploadState::Incomplete));
-    let direct = DirectRequestBody::new(body, length, Arc::clone(&state), deadline);
+    let state = SharedUploadState::new(UploadState::Incomplete);
+    let direct = DirectRequestBody::new(body, length, state.clone(), deadline);
     send_once(
         generation,
         OutgoingBody {
@@ -178,7 +180,13 @@ async fn send_once(
             return Err(fault);
         }
     };
-    let relay = DirectResponseBody::new(body, lease, outgoing.upload, deadline);
+    let relay = DirectResponseBody::new(
+        body,
+        lease,
+        outgoing.upload,
+        deadline,
+        generation.response_idle_timeout,
+    );
     let mut downstream = Response::new(Body::new(relay));
     *downstream.status_mut() = parts.status;
     *downstream.headers_mut() = headers;
@@ -188,7 +196,7 @@ async fn send_once(
 fn failed_upload(upload: &Option<SharedUploadState>) -> Result<Option<HttpFault>, HttpFault> {
     upload
         .as_ref()
-        .map(snapshot_upload)
+        .map(SharedUploadState::snapshot)
         .transpose()
         .map(|state| {
             state.and_then(|state| match state {
@@ -203,7 +211,7 @@ fn selected_send_fault(upload: &Option<SharedUploadState>) -> Result<HttpFault, 
 }
 
 fn deadline_fault(upload: Option<&SharedUploadState>) -> HttpFault {
-    match upload.map(snapshot_upload).transpose() {
+    match upload.map(SharedUploadState::snapshot).transpose() {
         Err(fault) => fault,
         Ok(state) => match state {
             Some(UploadState::Incomplete)
@@ -251,13 +259,6 @@ fn check_precommit_deadline_at(
     }
 }
 
-fn snapshot_upload(state: &SharedUploadState) -> Result<UploadState, HttpFault> {
-    state
-        .lock()
-        .map(|state| *state)
-        .map_err(|_| HttpFault::InternalError)
-}
-
 const fn map_admission(error: AdmissionError) -> HttpFault {
     match error {
         AdmissionError::Draining => HttpFault::RouterUnavailable,
@@ -276,12 +277,11 @@ const fn map_dispatch(error: DispatchError) -> HttpFault {
 #[allow(clippy::expect_used)]
 mod tests {
     use std::cell::Cell;
-    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use super::{
-        HttpFault, UploadState, authorize_upstream_attempt_at, deadline_outcome, failed_upload,
-        selected_send_fault,
+        HttpFault, SharedUploadState, UploadState, authorize_upstream_attempt_at, deadline_outcome,
+        failed_upload, selected_send_fault,
     };
 
     #[test]
@@ -296,12 +296,14 @@ mod tests {
         assert_eq!(result, Err(HttpFault::UpstreamTimeout));
         assert_eq!(attempts.get(), 0, "an expired request cannot start a send");
 
-        let upload = Arc::new(Mutex::new(UploadState::Incomplete));
+        let upload = SharedUploadState::new(UploadState::Incomplete);
         assert!(matches!(
             authorize_upstream_attempt_at(deadline, Some(&upload), deadline),
             Err(HttpFault::RequestTimeout)
         ));
-        *upload.lock().expect("update test upload state") = UploadState::Complete;
+        upload
+            .publish(UploadState::Complete)
+            .expect("update test upload state");
         assert!(matches!(
             authorize_upstream_attempt_at(deadline, Some(&upload), deadline),
             Err(HttpFault::UpstreamTimeout)
@@ -314,30 +316,30 @@ mod tests {
             selected_send_fault(&None),
             Ok(HttpFault::UpstreamProtocolError)
         );
-        let complete = Some(Arc::new(Mutex::new(UploadState::Complete)));
+        let complete = Some(SharedUploadState::new(UploadState::Complete));
         assert_eq!(
             selected_send_fault(&complete),
             Ok(HttpFault::UpstreamProtocolError)
         );
-        let failed = Some(Arc::new(Mutex::new(UploadState::Failed(
+        let failed = Some(SharedUploadState::new(UploadState::Failed(
             HttpFault::RequestTimeout,
-        ))));
+        )));
         assert_eq!(selected_send_fault(&failed), Ok(HttpFault::RequestTimeout));
     }
 
     #[test]
     fn completed_upstream_response_accepts_an_incomplete_upload() {
-        let incomplete = Some(Arc::new(Mutex::new(UploadState::Incomplete)));
+        let incomplete = Some(SharedUploadState::new(UploadState::Incomplete));
 
         assert_eq!(failed_upload(&incomplete), Ok(None));
     }
 
     #[test]
     fn only_worker_owned_precommit_timeouts_request_an_immediate_probe() {
-        let complete = Arc::new(Mutex::new(UploadState::Complete));
-        let incomplete = Arc::new(Mutex::new(UploadState::Incomplete));
-        let client_timeout = Arc::new(Mutex::new(UploadState::Failed(HttpFault::RequestTimeout)));
-        let body_fault = Arc::new(Mutex::new(UploadState::Failed(HttpFault::MalformedRequest)));
+        let complete = SharedUploadState::new(UploadState::Complete);
+        let incomplete = SharedUploadState::new(UploadState::Incomplete);
+        let client_timeout = SharedUploadState::new(UploadState::Failed(HttpFault::RequestTimeout));
+        let body_fault = SharedUploadState::new(UploadState::Failed(HttpFault::MalformedRequest));
 
         for upload in [None, Some(&complete)] {
             let outcome = deadline_outcome(upload);

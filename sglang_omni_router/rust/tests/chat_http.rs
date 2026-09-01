@@ -287,6 +287,17 @@ fn serve_connection(
                 thread::sleep(Duration::from_millis(750));
                 write_response(&mut stream, b"E\r\ndata: [DONE]\n\n\r\n0\r\n\r\n");
             }
+            b"paced" => {
+                write_response(
+                    &mut stream,
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+                );
+                for byte in *b"abc" {
+                    thread::sleep(Duration::from_millis(40));
+                    write_response(&mut stream, &[b'1', b'\r', b'\n', byte, b'\r', b'\n']);
+                }
+                write_response(&mut stream, b"0\r\n\r\n");
+            }
             b"timeout" => {
                 thread::sleep(Duration::from_millis(750));
                 write_response(
@@ -421,6 +432,7 @@ impl RouterProcess {
             timeout_ms,
             "round_robin",
             1_048_576,
+            None,
         )
     }
 
@@ -436,6 +448,7 @@ impl RouterProcess {
             timeout_ms,
             "round_robin",
             1_048_576,
+            None,
         )
     }
 
@@ -446,6 +459,7 @@ impl RouterProcess {
         timeout_ms: u64,
         strategy: &str,
         streamed_request_max_bytes: u64,
+        response_idle_timeout_ms: Option<u64>,
     ) -> Self {
         let reservation = TcpListener::bind("127.0.0.1:0").expect("reserve router address");
         let address = reservation.local_addr().expect("read router address");
@@ -469,10 +483,13 @@ impl RouterProcess {
                 "\n[[workers]]\nworker_id = \"{worker_id}\"\nbase_url = \"{base_url}\"\ntrust_domain = \"local\"\ndefault_model_id = \"omni\"\nhealth_path = \"/health\"\n\n[workers.capacity]\ngeneration_http = {worker_capacity}\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"omni\"]\n{profile_fields}\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\"]\n"
             ));
         }
+        let response_idle_timeout = response_idle_timeout_ms.map_or_else(String::new, |timeout| {
+            format!("response_idle_timeout_ms = {timeout}\n")
+        });
         fs::write(
             &config,
             format!(
-                "schema_version = 1\n\n[server]\nlisten = \"{address}\"\nmax_connections = 128\n\n[shutdown]\ndrain_timeout_ms = 2000\n\n[logging]\nformat = \"json\"\nfilter = \"info\"\n\n[router]\nstrategy = \"{strategy}\"\n\n[admission]\nglobal = {global}\ngeneration_http = {global}\n\n[health]\ninterval_ms = 100\ntimeout_ms = 50\nsuccess_threshold = 1\nfailure_threshold = 1\n\n[http_generation]\ntrust_domain = \"local\"\nstreamed_request_max_bytes = {streamed_request_max_bytes}\nconnect_timeout_ms = 100\nrequest_timeout_ms = {timeout_ms}\npool_idle_timeout_ms = 30000\npool_max_idle_per_host = 8\n{worker_config}"
+                "schema_version = 1\n\n[server]\nlisten = \"{address}\"\nmax_connections = 128\n\n[shutdown]\ndrain_timeout_ms = 2000\n\n[logging]\nformat = \"json\"\nfilter = \"info\"\n\n[router]\nstrategy = \"{strategy}\"\n\n[admission]\nglobal = {global}\ngeneration_http = {global}\n\n[health]\ninterval_ms = 100\ntimeout_ms = 50\nsuccess_threshold = 1\nfailure_threshold = 1\n\n[http_generation]\ntrust_domain = \"local\"\nstreamed_request_max_bytes = {streamed_request_max_bytes}\nconnect_timeout_ms = 100\nrequest_timeout_ms = {timeout_ms}\n{response_idle_timeout}pool_idle_timeout_ms = 30000\npool_max_idle_per_host = 8\n{worker_config}"
             ),
         )
         .expect("write router config");
@@ -852,6 +869,7 @@ fn worker_capacity_is_independent_from_global_admission() {
         2_000,
         "round_robin",
         1_048_576,
+        None,
     );
 
     let address = router.address;
@@ -874,6 +892,7 @@ fn least_requests_prefers_the_less_occupied_replica() {
         2_000,
         "least_requests",
         1_048_576,
+        None,
     );
 
     let address = router.address;
@@ -1009,7 +1028,8 @@ fn upload_deadline_survives_early_stream_commitment() {
         1,
         300,
         "round_robin",
-        16 * 1024 * 1024,
+        64 * 1024 * 1024,
+        None,
     );
     let mut reader = TcpStream::connect(router.address).expect("connect stalled upload");
     reader
@@ -1022,10 +1042,15 @@ fn upload_deadline_survives_early_stream_commitment() {
     let upload = thread::spawn(move || {
         writer
             .write_all(
-                b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 16777216\r\nConnection: close\r\n\r\n",
+                b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 67108864\r\nConnection: close\r\n\r\n",
             )
             .expect("write stalled-upload head");
-        let _result = writer.write_all(&vec![b' '; 16 * 1024 * 1024]);
+        let chunk = [b' '; 64 * 1024];
+        for _ in 0..1024 {
+            if writer.write_all(&chunk).is_err() {
+                break;
+            }
+        }
     });
 
     let mut committed = [0_u8; 512];
@@ -1047,6 +1072,111 @@ fn upload_deadline_survives_early_stream_commitment() {
     );
     drop(reader);
     upload.join().expect("join stalled-upload writer");
+}
+
+#[test]
+fn response_idle_timeout_ignores_incomplete_uploads() {
+    let worker = Worker::start_stalled_upload();
+    let router = RouterProcess::start_configured(
+        &[("worker-a", worker.address, false, GenerationProfile::Text)],
+        1,
+        1,
+        2_000,
+        "round_robin",
+        1_048_576,
+        Some(50),
+    );
+    let mut reader = TcpStream::connect(router.address).expect("connect incomplete upload");
+    reader
+        .set_read_timeout(Some(DEADLINE))
+        .expect("bound incomplete-upload read");
+    let mut writer = reader.try_clone().expect("clone incomplete-upload client");
+    writer
+        .set_write_timeout(Some(DEADLINE))
+        .expect("bound incomplete-upload write");
+    let request_started = Instant::now();
+    let upload = thread::spawn(move || {
+        writer
+            .write_all(
+                b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n",
+            )
+            .expect("write incomplete-upload head");
+        let chunk = [b' '; 16 * 1024];
+        for _ in 0..64 {
+            if writer.write_all(&chunk).is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    });
+
+    let mut committed = Vec::new();
+    let mut chunk = [0_u8; 512];
+    while !committed
+        .windows(b"HTTP/1.1 200".len())
+        .any(|part| part == b"HTTP/1.1 200")
+    {
+        let count = reader
+            .read(&mut chunk)
+            .expect("read incomplete-upload response prefix");
+        assert_ne!(count, 0, "response ended before commitment");
+        committed.extend_from_slice(&chunk[..count]);
+    }
+
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        status(&post(router.address, b"{}", None)),
+        429,
+        "response-idle timeout ran before the upload completed after {:?}",
+        request_started.elapsed()
+    );
+    assert_ne!(status(&post_when_capacity_releases(router.address)), 429);
+    drop(reader);
+    upload.join().expect("join incomplete-upload writer");
+}
+
+#[test]
+fn response_idle_timeout_releases_capacity_after_upload_completion() {
+    let worker = Worker::start();
+    let router = RouterProcess::start_configured(
+        &[("worker-a", worker.address, false, GenerationProfile::Text)],
+        1,
+        1,
+        2_000,
+        "round_robin",
+        1_048_576,
+        Some(75),
+    );
+
+    let response = post(router.address, b"slow", None);
+    assert_eq!(status(&response), 200);
+    assert!(response.windows(9).any(|part| part == b"data: one"));
+    assert!(!response.windows(6).any(|part| part == b"[DONE]"));
+
+    let recovered = post_when_capacity_releases(router.address);
+    assert_eq!(status(&recovered), 200);
+}
+
+#[test]
+fn response_activity_resets_the_idle_timeout() {
+    let worker = Worker::start();
+    let router = RouterProcess::start_configured(
+        &[("worker-a", worker.address, false, GenerationProfile::Text)],
+        1,
+        1,
+        2_000,
+        "round_robin",
+        1_048_576,
+        Some(75),
+    );
+
+    let response = post(router.address, b"paced", None);
+    assert_eq!(status(&response), 200);
+    let body = response
+        .windows(4)
+        .position(|part| part == b"\r\n\r\n")
+        .and_then(|head_end| decode_chunks(&response[head_end + 4..]));
+    assert_eq!(body.as_deref(), Some(b"abc".as_slice()));
 }
 
 #[test]

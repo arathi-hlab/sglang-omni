@@ -82,7 +82,6 @@ impl WorkerPool {
             .map_err(crate::error::RouterError::HealthClient)?;
         let generation_client = build_generation_client(
             config.http_generation.connect_timeout(),
-            config.http_generation.response_idle_timeout(),
             config.http_generation.pool_idle_timeout(),
             config.http_generation.pool_max_idle_per_host,
         )

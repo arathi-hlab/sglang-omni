@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
 use http_body::{Frame, SizeHint};
@@ -20,6 +21,8 @@ pub(crate) struct DirectResponseBody {
     lease: Option<RequestLease>,
     upload: Option<SharedUploadState>,
     upload_deadline: Option<Pin<Box<tokio::time::Sleep>>>,
+    response_idle_timeout: Option<Duration>,
+    response_idle_deadline: Option<Pin<Box<tokio::time::Sleep>>>,
     terminal: bool,
 }
 
@@ -29,15 +32,23 @@ impl DirectResponseBody {
         lease: RequestLease,
         upload: Option<SharedUploadState>,
         deadline: tokio::time::Instant,
+        response_idle_timeout: Option<Duration>,
     ) -> Self {
         let upload_deadline = upload
             .as_ref()
             .map(|_| Box::pin(tokio::time::sleep_until(deadline)));
+        let response_idle_deadline = if upload.is_none() {
+            response_idle_timeout.map(tokio::time::sleep).map(Box::pin)
+        } else {
+            None
+        };
         Self {
             inner: Some(inner),
             lease: Some(lease),
             upload,
             upload_deadline,
+            response_idle_timeout,
+            response_idle_deadline,
             terminal: false,
         }
     }
@@ -54,6 +65,7 @@ impl DirectResponseBody {
         drop(self.lease.take());
         drop(self.upload.take());
         drop(self.upload_deadline.take());
+        drop(self.response_idle_deadline.take());
     }
 
     fn fail(&mut self, upstream_failure: bool) -> Poll<Option<Result<Frame<Bytes>, RelayError>>> {
@@ -65,11 +77,12 @@ impl DirectResponseBody {
         let Some(upload) = self.upload.as_ref() else {
             return Ok(());
         };
-        let state = upload.lock().map(|state| *state).map_err(|_| RelayError)?;
+        let state = upload.poll_state(cx).map_err(|_| RelayError)?;
         match state {
             UploadState::Complete => {
                 self.upload = None;
                 self.upload_deadline = None;
+                self.reset_response_idle();
                 Ok(())
             }
             UploadState::Failed(_) => Err(RelayError),
@@ -81,6 +94,19 @@ impl DirectResponseBody {
                 if expired { Err(RelayError) } else { Ok(()) }
             }
         }
+    }
+
+    fn reset_response_idle(&mut self) {
+        self.response_idle_deadline = self
+            .response_idle_timeout
+            .map(tokio::time::sleep)
+            .map(Box::pin);
+    }
+
+    fn response_idle_expired(&mut self, cx: &mut Context<'_>) -> bool {
+        self.response_idle_deadline
+            .as_mut()
+            .is_some_and(|deadline| deadline.as_mut().poll(cx).is_ready())
     }
 }
 
@@ -109,7 +135,12 @@ impl http_body::Body for DirectResponseBody {
         };
         match Pin::new(inner).poll_frame(cx) {
             Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
-                Ok(data) => Poll::Ready(Some(Ok(Frame::data(data)))),
+                Ok(data) => {
+                    if self.upload.is_none() {
+                        self.reset_response_idle();
+                    }
+                    Poll::Ready(Some(Ok(Frame::data(data))))
+                }
                 Err(_trailers) => self.fail(true),
             },
             Poll::Ready(Some(Err(_source))) => self.fail(true),
@@ -117,6 +148,7 @@ impl http_body::Body for DirectResponseBody {
                 self.terminalize(false);
                 Poll::Ready(None)
             }
+            Poll::Pending if self.response_idle_expired(cx) => self.fail(true),
             Poll::Pending => Poll::Pending,
         }
     }

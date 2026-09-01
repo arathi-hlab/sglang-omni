@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 use axum::body::Body;
 use bytes::Bytes;
@@ -19,7 +19,58 @@ pub(crate) enum UploadState {
     Complete,
 }
 
-pub(crate) type SharedUploadState = Arc<Mutex<UploadState>>;
+struct UploadStatus {
+    state: UploadState,
+    relay_waker: Option<Waker>,
+}
+
+#[derive(Clone)]
+pub(crate) struct SharedUploadState {
+    inner: Arc<Mutex<UploadStatus>>,
+}
+
+impl SharedUploadState {
+    pub(crate) fn new(state: UploadState) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(UploadStatus {
+                state,
+                relay_waker: None,
+            })),
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<UploadState, HttpFault> {
+        self.inner
+            .lock()
+            .map(|status| status.state)
+            .map_err(|_| HttpFault::InternalError)
+    }
+
+    pub(crate) fn poll_state(&self, cx: &Context<'_>) -> Result<UploadState, HttpFault> {
+        let mut status = self.inner.lock().map_err(|_| HttpFault::InternalError)?;
+        if status.state == UploadState::Incomplete
+            && status
+                .relay_waker
+                .as_ref()
+                .is_none_or(|waker| !waker.will_wake(cx.waker()))
+        {
+            status.relay_waker = Some(cx.waker().clone());
+        }
+        Ok(status.state)
+    }
+
+    pub(crate) fn publish(&self, state: UploadState) -> Result<(), HttpFault> {
+        let waker = {
+            let mut status = self.inner.lock().map_err(|_| HttpFault::InternalError)?;
+            status.state = state;
+            status.relay_waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Error)]
 #[error("request upload failed")]
@@ -56,9 +107,7 @@ impl DirectRequestBody {
 
     fn fail(&mut self, fault: HttpFault) -> Poll<Option<Result<Frame<Bytes>, UploadError>>> {
         self.terminal = true;
-        if let Ok(mut state) = self.state.lock() {
-            *state = UploadState::Failed(fault);
-        }
+        let _published = self.state.publish(UploadState::Failed(fault));
         Poll::Ready(Some(Err(UploadError)))
     }
 }
@@ -102,9 +151,7 @@ impl http_body::Body for DirectRequestBody {
                     self.observed = observed;
                     if observed == self.expected {
                         // Axum/Hyper owns fixed-length wire framing; do not hold this frame for a synthetic EOF.
-                        if let Ok(mut state) = self.state.lock() {
-                            *state = UploadState::Complete;
-                        } else {
+                        if self.state.publish(UploadState::Complete).is_err() {
                             return self.fail(HttpFault::InternalError);
                         }
                         self.final_frame_returned = true;
@@ -119,9 +166,7 @@ impl http_body::Body for DirectRequestBody {
                 if self.observed != self.expected {
                     return self.fail(HttpFault::MalformedRequest);
                 }
-                if let Ok(mut state) = self.state.lock() {
-                    *state = UploadState::Complete;
-                } else {
+                if self.state.publish(UploadState::Complete).is_err() {
                     return self.fail(HttpFault::InternalError);
                 }
                 Poll::Ready(None)
@@ -148,13 +193,13 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::pin::Pin;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
     use std::thread;
     use std::time::Duration;
 
-    use super::{DirectRequestBody, HttpFault, UploadState};
+    use super::{DirectRequestBody, HttpFault, SharedUploadState, UploadState};
     use axum::body::Body;
     use bytes::{Bytes, BytesMut};
     use http_body::{Body as _, Frame};
@@ -220,11 +265,11 @@ mod tests {
     }
 
     async fn drive(body: Body, expected: u64) -> (Bytes, UploadState) {
-        let state = Arc::new(Mutex::new(UploadState::Incomplete));
+        let state = SharedUploadState::new(UploadState::Incomplete);
         let mut direct = DirectRequestBody::new(
             body,
             expected,
-            Arc::clone(&state),
+            state.clone(),
             tokio::time::Instant::now() + Duration::from_secs(1),
         );
         let mut output = BytesMut::new();
@@ -235,7 +280,7 @@ mod tests {
                     .expect("direct body only returns data frames"),
             );
         }
-        let terminal = *state.lock().expect("read upload state");
+        let terminal = state.snapshot().expect("read upload state");
         (output.freeze(), terminal)
     }
 
@@ -272,32 +317,32 @@ mod tests {
             UploadState::Failed(HttpFault::MalformedRequest)
         );
 
-        let state = Arc::new(Mutex::new(UploadState::Incomplete));
+        let state = SharedUploadState::new(UploadState::Incomplete);
         let mut direct = DirectRequestBody::new(
             Body::new(Pending),
             1,
-            Arc::clone(&state),
+            state.clone(),
             tokio::time::Instant::now(),
         );
         let result = poll_fn(|cx| Pin::new(&mut direct).poll_frame(cx)).await;
         assert!(result.is_some_and(|frame| frame.is_err()));
         assert_eq!(
-            *state.lock().expect("read deadline state"),
+            state.snapshot().expect("read deadline state"),
             UploadState::Failed(HttpFault::RequestTimeout)
         );
 
-        let ready_state = Arc::new(Mutex::new(UploadState::Incomplete));
+        let ready_state = SharedUploadState::new(UploadState::Incomplete);
         let mut ready = DirectRequestBody::new(
             Body::new(AlwaysReady),
             4,
-            Arc::clone(&ready_state),
+            ready_state.clone(),
             tokio::time::Instant::now(),
         );
         let result = poll_fn(|cx| Pin::new(&mut ready).poll_frame(cx)).await;
         assert!(result.is_some_and(|frame| frame.is_err()));
         assert_eq!(
-            *ready_state
-                .lock()
+            ready_state
+                .snapshot()
                 .expect("read authoritative deadline state"),
             UploadState::Failed(HttpFault::RequestTimeout)
         );
@@ -306,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn direct_upload_skips_empty_data_and_completes_at_exact_length() {
         let polls = Arc::new(AtomicUsize::new(0));
-        let state = Arc::new(Mutex::new(UploadState::Incomplete));
+        let state = SharedUploadState::new(UploadState::Incomplete);
         let mut direct = DirectRequestBody::new(
             Body::new(CountedFrames {
                 frames: VecDeque::from([
@@ -318,7 +363,7 @@ mod tests {
                 polls: Arc::clone(&polls),
             }),
             2,
-            Arc::clone(&state),
+            state.clone(),
             tokio::time::Instant::now() + Duration::from_secs(1),
         );
         let waker = Waker::noop();
@@ -327,7 +372,7 @@ mod tests {
         assert!(Pin::new(&mut direct).poll_frame(&mut context).is_pending());
         assert_eq!(polls.load(Ordering::Relaxed), 1);
         assert_eq!(
-            *state.lock().expect("read cooperative upload state"),
+            state.snapshot().expect("read cooperative upload state"),
             UploadState::Incomplete
         );
         let final_frame = match Pin::new(&mut direct).poll_frame(&mut context) {
@@ -338,7 +383,7 @@ mod tests {
         assert_eq!(final_frame, Bytes::from_static(b"ab"));
         assert_eq!(polls.load(Ordering::Relaxed), 2);
         assert_eq!(
-            *state.lock().expect("read completed upload state"),
+            state.snapshot().expect("read completed upload state"),
             UploadState::Complete
         );
         assert!(matches!(
@@ -351,11 +396,11 @@ mod tests {
             Ok(Frame::data(Bytes::new())),
             Ok(Frame::data(Bytes::new())),
         ]));
-        let empty_state = Arc::new(Mutex::new(UploadState::Incomplete));
+        let empty_state = SharedUploadState::new(UploadState::Incomplete);
         let mut empty = DirectRequestBody::new(
             Body::new(empty_frames),
             0,
-            Arc::clone(&empty_state),
+            empty_state.clone(),
             tokio::time::Instant::now() + Duration::from_secs(1),
         );
         assert!(Pin::new(&mut empty).poll_frame(&mut context).is_pending());
@@ -365,7 +410,9 @@ mod tests {
             Poll::Ready(None)
         ));
         assert_eq!(
-            *empty_state.lock().expect("read zero-length upload state"),
+            empty_state
+                .snapshot()
+                .expect("read zero-length upload state"),
             UploadState::Complete
         );
     }
@@ -404,7 +451,7 @@ mod tests {
             .build()
             .expect("build pool client");
         for _ in 0..2 {
-            let state = Arc::new(Mutex::new(UploadState::Incomplete));
+            let state = SharedUploadState::new(UploadState::Incomplete);
             let body = DirectRequestBody::new(
                 Body::from("{}"),
                 2,
