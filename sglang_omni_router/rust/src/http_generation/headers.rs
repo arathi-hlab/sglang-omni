@@ -22,7 +22,15 @@ pub(crate) fn validate_request(headers: &HeaderMap) -> Result<RequestFraming, Ht
     {
         return Err(HttpFault::UnsupportedMediaType);
     }
-    if headers.contains_key(CONTENT_ENCODING) {
+    let mut encodings = headers.get_all(CONTENT_ENCODING).iter();
+    let encoding = encodings.next();
+    if encodings.next().is_some()
+        || encoding.is_some_and(|value| {
+            !value
+                .to_str()
+                .is_ok_and(|text| text.eq_ignore_ascii_case("identity"))
+        })
+    {
         return Err(HttpFault::UnsupportedContentEncoding);
     }
     let mut expectations = headers.get_all(EXPECT).iter();
@@ -142,60 +150,19 @@ pub(crate) fn parse_content_length(value: &HeaderValue) -> Option<u64> {
     text.parse().ok()
 }
 
+fn is_media_type(value: &str, expected: &str) -> bool {
+    parse_content_type(value).is_some_and(|media| media.eq_ignore_ascii_case(expected))
+}
+
 pub(crate) fn is_request_media_type(value: &str, expected: &str) -> bool {
-    let mut charset_seen = false;
-    let mut valid_parameters = true;
-    let media = parse_content_type(value, |name, parameter| {
-        if charset_seen || !name.eq_ignore_ascii_case("charset") {
-            valid_parameters = false;
-            return;
-        }
-        charset_seen = true;
-        if !parameter.eq_ignore_ascii_case(b"utf-8") {
-            valid_parameters = false;
-        }
-    });
-    media.is_some_and(|media| media.eq_ignore_ascii_case(expected) && valid_parameters)
+    is_media_type(value, expected)
 }
 
 pub(crate) fn valid_generic_content_type(value: &str) -> bool {
-    parse_content_type(value, |_name, _parameter| {}).is_some()
+    parse_content_type(value).is_some()
 }
 
-#[derive(Clone, Copy)]
-enum ParameterValue<'a> {
-    Token(&'a [u8]),
-    Quoted(&'a [u8]),
-}
-
-impl ParameterValue<'_> {
-    fn eq_ignore_ascii_case(self, expected: &[u8]) -> bool {
-        let mut index = 0;
-        let mut expected_index = 0;
-        let bytes = match self {
-            Self::Token(bytes) | Self::Quoted(bytes) => bytes,
-        };
-        while index < bytes.len() {
-            if matches!(self, Self::Quoted(_)) && bytes[index] == b'\\' {
-                index += 1;
-            }
-            if index >= bytes.len()
-                || expected_index >= expected.len()
-                || !bytes[index].eq_ignore_ascii_case(&expected[expected_index])
-            {
-                return false;
-            }
-            index += 1;
-            expected_index += 1;
-        }
-        expected_index == expected.len()
-    }
-}
-
-fn parse_content_type<'a>(
-    value: &'a str,
-    mut on_parameter: impl FnMut(&'a str, ParameterValue<'a>),
-) -> Option<&'a str> {
+fn parse_content_type(value: &str) -> Option<&str> {
     let bytes = value.as_bytes();
     let mut cursor = skip_ows(bytes, 0);
     let media_start = cursor;
@@ -215,23 +182,17 @@ fn parse_content_type<'a>(
             return None;
         }
         cursor = skip_ows(bytes, cursor + 1);
-        let name_start = cursor;
         cursor = parse_token(bytes, cursor)?;
-        let name = &value[name_start..cursor];
         if bytes.get(cursor) != Some(&b'=') {
             return None;
         }
         cursor += 1;
-        let parameter = if bytes.get(cursor) == Some(&b'"') {
+        if bytes.get(cursor) == Some(&b'"') {
             let quoted_start = cursor + 1;
             cursor = quoted_end(bytes, quoted_start)?;
-            ParameterValue::Quoted(&bytes[quoted_start..cursor - 1])
         } else {
-            let token_start = cursor;
             cursor = parse_token(bytes, cursor)?;
-            ParameterValue::Token(&bytes[token_start..cursor])
-        };
-        on_parameter(name, parameter);
+        }
     }
 }
 
@@ -326,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn request_envelope_requires_fixed_unencoded_json() {
+    fn request_envelope_requires_fixed_identity_encoded_json() {
         let headers = valid_request_headers();
         assert_eq!(
             validate_request(&headers)
@@ -339,7 +300,7 @@ mod tests {
             (CONTENT_TYPE, "text/plain", HttpFault::UnsupportedMediaType),
             (
                 CONTENT_ENCODING,
-                "identity",
+                "gzip",
                 HttpFault::UnsupportedContentEncoding,
             ),
             (TRANSFER_ENCODING, "chunked", HttpFault::MalformedRequest),
@@ -348,6 +309,10 @@ mod tests {
             rejected.insert(name, HeaderValue::from_static(value));
             assert_eq!(validate_request(&rejected).err(), Some(fault));
         }
+
+        let mut identity = headers.clone();
+        identity.insert(CONTENT_ENCODING, HeaderValue::from_static("identity"));
+        assert!(validate_request(&identity).is_ok());
 
         let mut missing_length = headers;
         missing_length.remove(CONTENT_LENGTH);

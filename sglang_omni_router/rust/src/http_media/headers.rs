@@ -76,7 +76,11 @@ pub(super) fn validate_request(
     {
         return Err(HttpFault::UnsupportedContentEncoding);
     }
-    if headers.contains_key(EXPECT) {
+    let mut expectations = headers.get_all(EXPECT).iter();
+    if let Some(expectation) = expectations.next()
+        && (!expectation.as_bytes().eq_ignore_ascii_case(b"100-continue")
+            || expectations.next().is_some())
+    {
         return Err(HttpFault::ExpectationFailed);
     }
     if headers.contains_key(TRAILER) {
@@ -344,9 +348,27 @@ fn multipart_boundary(value: &str) -> Option<String> {
         return None;
     }
     let mut boundary = None;
+    let mut charset_seen = false;
     for parameter in parts {
         let (name, raw) = parameter.trim().split_once('=')?;
-        if !name.trim().eq_ignore_ascii_case("boundary") || boundary.is_some() {
+        let name = name.trim();
+        if name.eq_ignore_ascii_case("charset") {
+            if charset_seen {
+                return None;
+            }
+            charset_seen = true;
+            let raw = raw.trim();
+            let charset = if raw.starts_with('"') {
+                raw.strip_prefix('"')?.strip_suffix('"')?
+            } else {
+                raw
+            };
+            if !charset.eq_ignore_ascii_case("utf-8") {
+                return None;
+            }
+            continue;
+        }
+        if !name.eq_ignore_ascii_case("boundary") || boundary.is_some() {
             return None;
         }
         let raw = raw.trim();
@@ -443,11 +465,13 @@ mod tests {
     }
 
     #[test]
-    fn json_content_type_uses_the_strict_shared_request_parser() {
+    fn json_content_type_accepts_worker_owned_parameters() {
         for value in [
             b"application/json".as_slice(),
             b"application/json; charset=utf-8".as_slice(),
             b"application/json; charset=\"UTF-8\"".as_slice(),
+            b"application/json; charset=utf-8; charset=utf-8".as_slice(),
+            b"application/json; version=1".as_slice(),
         ] {
             validate_request(&json_headers(value), RequestKind::Json)
                 .expect("valid JSON content type");
@@ -456,8 +480,6 @@ mod tests {
         for value in [
             b"application/json; charset=\"utf-8".as_slice(),
             b"application/json;".as_slice(),
-            b"application/json; charset=utf-8; charset=utf-8".as_slice(),
-            b"application/json; version=1".as_slice(),
             b"application/json; charset=\"utf-8\"junk".as_slice(),
         ] {
             assert_eq!(
@@ -474,6 +496,14 @@ mod tests {
             ("multipart/form-data; boundary=abc-123", "abc-123"),
             ("multipart/form-data; boundary=\"abc-123\"", "abc-123"),
             ("multipart/form-data; boundary=\"abc def\"", "abc def"),
+            (
+                "multipart/form-data; charset=utf-8; boundary=abc-123",
+                "abc-123",
+            ),
+            (
+                "multipart/form-data; boundary=abc-123; charset=\"UTF-8\"",
+                "abc-123",
+            ),
         ] {
             let mut headers = HeaderMap::new();
             headers.insert(CONTENT_TYPE, HeaderValue::from_static(value));

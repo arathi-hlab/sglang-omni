@@ -82,13 +82,13 @@ fn valid_translation_config() -> String {
             "generation_http = 8\ntranscription_http = 4",
         );
     format!(
-        "{base}\n[[workers.service_profiles]]\nservice = \"transcription_http\"\nmodel_ids = [\"omni\"]\ntask = \"translate\"\nresponse_formats = [\"json\", \"text\", \"verbose_json\", \"srt\", \"vtt\", \"sse\"]\nmedia_profiles = [\"audio\"]\nstream_modes = [\"non_streaming\", \"streaming\"]\n\n[http_media]\nroutes = [\"translation\"]\ntrust_domain = \"local\"\nbuffered_request_max_bytes = 1048576\nbuffered_request_total_bytes = 8388608\nstreamed_request_max_bytes = 16777216\nconnect_timeout_ms = 1000\nrequest_timeout_ms = 5000\npool_idle_timeout_ms = 30000\npool_max_idle_per_host = 8\n"
+        "{base}\n[[workers.service_profiles]]\nservice = \"transcription_http\"\nmodel_ids = [\"omni\"]\ntask = \"translate\"\nresponse_formats = [\"json\", \"text\", \"verbose_json\", \"srt\", \"vtt\", \"sse\"]\nstream_modes = [\"non_streaming\", \"streaming\"]\n\n[http_media]\nroutes = [\"translation\"]\ntrust_domain = \"local\"\nbuffered_request_max_bytes = 1048576\nbuffered_request_total_bytes = 8388608\nstreamed_request_max_bytes = 16777216\nconnect_timeout_ms = 1000\nrequest_timeout_ms = 5000\npool_idle_timeout_ms = 30000\npool_max_idle_per_host = 8\n"
     )
 }
 
 fn media_only_config() -> String {
     String::from(
-        "schema_version = 1\n\n[server]\nlisten = \"127.0.0.1:30000\"\n\n[shutdown]\ndrain_timeout_ms = 30000\n\n[logging]\nformat = \"json\"\nfilter = \"info\"\n\n[router]\nstrategy = \"round_robin\"\n\n[admission]\nglobal = 16\ntranscription_http = 8\n\n[health]\ninterval_ms = 1000\ntimeout_ms = 500\nsuccess_threshold = 1\nfailure_threshold = 3\nmax_concurrent_probes = 4\n\n[http_media]\nroutes = [\"transcription\"]\ntrust_domain = \"local\"\nbuffered_request_max_bytes = 1048576\nbuffered_request_total_bytes = 8388608\nstreamed_request_max_bytes = 16777216\nconnect_timeout_ms = 1000\nrequest_timeout_ms = 5000\npool_idle_timeout_ms = 30000\npool_max_idle_per_host = 8\n\n[[workers]]\nworker_id = \"asr\"\nbase_url = \"http://127.0.0.1:8000/\"\ntrust_domain = \"local\"\ndefault_model_id = \"asr\"\n\n[workers.capacity]\ntranscription_http = 8\n\n[[workers.service_profiles]]\nservice = \"transcription_http\"\nmodel_ids = [\"asr\"]\ntask = \"transcribe\"\nresponse_formats = [\"json\", \"text\", \"verbose_json\", \"srt\", \"vtt\", \"sse\"]\nmedia_profiles = [\"audio\"]\nstream_modes = [\"non_streaming\", \"streaming\"]\n",
+        "schema_version = 1\n\n[server]\nlisten = \"127.0.0.1:30000\"\n\n[shutdown]\ndrain_timeout_ms = 30000\n\n[logging]\nformat = \"json\"\nfilter = \"info\"\n\n[router]\nstrategy = \"round_robin\"\n\n[admission]\nglobal = 16\ntranscription_http = 8\n\n[health]\ninterval_ms = 1000\ntimeout_ms = 500\nsuccess_threshold = 1\nfailure_threshold = 3\nmax_concurrent_probes = 4\n\n[http_media]\nroutes = [\"transcription\"]\ntrust_domain = \"local\"\nbuffered_request_max_bytes = 1048576\nbuffered_request_total_bytes = 8388608\nstreamed_request_max_bytes = 16777216\nconnect_timeout_ms = 1000\nrequest_timeout_ms = 5000\npool_idle_timeout_ms = 30000\npool_max_idle_per_host = 8\n\n[[workers]]\nworker_id = \"asr\"\nbase_url = \"http://127.0.0.1:8000/\"\ntrust_domain = \"local\"\ndefault_model_id = \"asr\"\n\n[workers.capacity]\ntranscription_http = 8\n\n[[workers.service_profiles]]\nservice = \"transcription_http\"\nmodel_ids = [\"asr\"]\ntask = \"transcribe\"\nresponse_formats = [\"json\", \"text\", \"verbose_json\", \"srt\", \"vtt\", \"sse\"]\nstream_modes = [\"non_streaming\", \"streaming\"]\n",
     )
 }
 
@@ -162,7 +162,7 @@ fn speech_batch_profile_maximum_must_fit_class_admission() {
     let generation_only = valid_config("127.0.0.1:30000", 30_000, "info").replace(
         "generation_http = 8",
         "generation_http = 8\nspeech_batch = 3",
-    ) + "\n[[workers.service_profiles]]\nservice = \"speech_batch\"\nmodel_ids = [\"omni\"]\nresponse_formats = [\"wav\"]\ntasks = [\"text_to_speech\"]\nreference_forms = [\"none\"]\nmanaged_voice = false\nmax_batch_size = 3\neffective_features = []\n";
+    ) + "\n[[workers.service_profiles]]\nservice = \"speech_batch\"\nmodel_ids = [\"omni\"]\nresponse_formats = [\"wav\"]\ntasks = [\"text_to_speech\"]\nreference_forms = [\"none\"]\nmanaged_voice = false\nmax_batch_size = 3\n";
     assert!(load_bytes(generation_only.as_bytes()).is_ok());
 
     let base = generation_only.replace(

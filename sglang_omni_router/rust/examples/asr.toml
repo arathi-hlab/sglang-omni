@@ -53,7 +53,6 @@ service = "transcription_http"
 model_ids = ["asr-model"]
 task = "transcribe"
 response_formats = ["json", "text", "verbose_json", "srt", "vtt", "sse"]
-media_profiles = ["audio"]
 stream_modes = ["non_streaming", "streaming"]
 
 [[workers.service_profiles]]
@@ -61,7 +60,6 @@ service = "transcription_http"
 model_ids = ["asr-model"]
 task = "translate"
 response_formats = ["json", "text", "verbose_json", "sse"]
-media_profiles = ["audio"]
 stream_modes = ["non_streaming", "streaming"]
 
 [[workers]]
@@ -79,7 +77,6 @@ service = "transcription_http"
 model_ids = ["asr-model"]
 task = "transcribe"
 response_formats = ["json", "text", "verbose_json", "srt", "vtt", "sse"]
-media_profiles = ["audio"]
 stream_modes = ["non_streaming", "streaming"]
 
 [[workers.service_profiles]]
@@ -87,5 +84,4 @@ service = "transcription_http"
 model_ids = ["asr-model"]
 task = "translate"
 response_formats = ["json", "text", "verbose_json", "sse"]
-media_profiles = ["audio"]
 stream_modes = ["non_streaming", "streaming"]

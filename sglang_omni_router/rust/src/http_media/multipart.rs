@@ -1,5 +1,4 @@
 use crate::error::HttpFault;
-use crate::worker_pool::MediaProfile;
 
 const MAX_PARTS: usize = 64;
 const MAX_HEADER_BYTES: usize = 65_536;
@@ -10,7 +9,6 @@ pub(super) struct MultipartFacts {
     pub(super) model: Option<String>,
     pub(super) response_format: Option<String>,
     pub(super) stream: Option<bool>,
-    pub(super) media_profile: MediaProfile,
 }
 
 #[derive(Default)]
@@ -18,7 +16,7 @@ struct Facts {
     model: Option<String>,
     response_format: Option<String>,
     stream: Option<bool>,
-    file_profile: Option<MediaProfile>,
+    file_seen: bool,
 }
 
 pub(super) fn scan(body: &[u8], boundary: &[u8]) -> Result<MultipartFacts, HttpFault> {
@@ -84,26 +82,25 @@ pub(super) fn scan(body: &[u8], boundary: &[u8]) -> Result<MultipartFacts, HttpF
     if parts == 0 {
         return Err(HttpFault::MalformedRequest);
     }
+    if !facts.file_seen {
+        return Err(HttpFault::MalformedRequest);
+    }
     Ok(MultipartFacts {
         model: facts.model,
         response_format: facts.response_format,
         stream: facts.stream,
-        media_profile: facts.file_profile.ok_or(HttpFault::MalformedRequest)?,
     })
 }
 
 #[derive(Default)]
 struct PartHeaders {
     name: Option<String>,
-    filename: Option<String>,
-    content_type: Option<String>,
 }
 
 fn parse_headers(bytes: &[u8]) -> Result<PartHeaders, HttpFault> {
     let text = std::str::from_utf8(bytes).map_err(|_| HttpFault::MalformedRequest)?;
     let mut result = PartHeaders::default();
     let mut disposition_seen = false;
-    let mut content_type_seen = false;
     for line in text.split("\r\n") {
         if line.is_empty() || line.starts_with([' ', '\t']) {
             return Err(HttpFault::MalformedRequest);
@@ -116,15 +113,10 @@ fn parse_headers(bytes: &[u8]) -> Result<PartHeaders, HttpFault> {
             disposition_seen = true;
             parse_disposition(value.trim(), &mut result)?;
         } else if name.eq_ignore_ascii_case("content-type") {
-            if content_type_seen {
-                return Err(HttpFault::MalformedRequest);
-            }
-            content_type_seen = true;
             let value = value.trim();
             if value.is_empty() || !value.is_ascii() {
                 return Err(HttpFault::MalformedRequest);
             }
-            result.content_type = Some(value.to_ascii_lowercase());
         } else if !name.bytes().all(is_token_byte) {
             return Err(HttpFault::MalformedRequest);
         }
@@ -149,12 +141,7 @@ fn parse_disposition(value: &str, headers: &mut PartHeaders) -> Result<(), HttpF
             .split_once('=')
             .ok_or(HttpFault::MalformedRequest)?;
         let parsed = parse_parameter(raw.trim())?;
-        if key.eq_ignore_ascii_case("name") {
-            if headers.name.replace(parsed).is_some() {
-                return Err(HttpFault::MalformedRequest);
-            }
-        } else if key.eq_ignore_ascii_case("filename") && headers.filename.replace(parsed).is_some()
-        {
+        if key.eq_ignore_ascii_case("name") && headers.name.replace(parsed).is_some() {
             return Err(HttpFault::MalformedRequest);
         }
     }
@@ -226,7 +213,7 @@ fn classify_part(headers: &PartHeaders, value: &[u8], facts: &mut Facts) -> Resu
         "model" => set_model(&mut facts.model, value)?,
         "response_format" => set_text(&mut facts.response_format, value)?,
         "stream" => {
-            if facts.stream.is_some() || value.len() > MAX_ROUTING_VALUE_BYTES {
+            if value.len() > MAX_ROUTING_VALUE_BYTES {
                 return Err(HttpFault::MalformedRequest);
             }
             let text = std::str::from_utf8(value)
@@ -249,10 +236,7 @@ fn classify_part(headers: &PartHeaders, value: &[u8], facts: &mut Facts) -> Resu
             );
         }
         "file" => {
-            if facts.file_profile.is_some() {
-                return Err(HttpFault::MalformedRequest);
-            }
-            facts.file_profile = Some(media_profile(headers)?);
+            facts.file_seen = true;
         }
         _ => {}
     }
@@ -260,7 +244,7 @@ fn classify_part(headers: &PartHeaders, value: &[u8], facts: &mut Facts) -> Resu
 }
 
 fn set_model(slot: &mut Option<String>, value: &[u8]) -> Result<(), HttpFault> {
-    if slot.is_some() || value.len() > MAX_ROUTING_VALUE_BYTES {
+    if value.len() > MAX_ROUTING_VALUE_BYTES {
         return Err(HttpFault::MalformedRequest);
     }
     let text = std::str::from_utf8(value).map_err(|_| HttpFault::MalformedRequest)?;
@@ -269,7 +253,7 @@ fn set_model(slot: &mut Option<String>, value: &[u8]) -> Result<(), HttpFault> {
 }
 
 fn set_text(slot: &mut Option<String>, value: &[u8]) -> Result<(), HttpFault> {
-    if slot.is_some() || value.len() > MAX_ROUTING_VALUE_BYTES {
+    if value.len() > MAX_ROUTING_VALUE_BYTES {
         return Err(HttpFault::MalformedRequest);
     }
     let text = std::str::from_utf8(value)
@@ -280,33 +264,6 @@ fn set_text(slot: &mut Option<String>, value: &[u8]) -> Result<(), HttpFault> {
     }
     *slot = Some(text.to_owned());
     Ok(())
-}
-
-fn media_profile(headers: &PartHeaders) -> Result<MediaProfile, HttpFault> {
-    let content = headers
-        .content_type
-        .as_deref()
-        .and_then(|value| value.split(';').next())
-        .map(str::trim);
-    let content_profile = match content {
-        Some(value) if value.starts_with("audio/") => Some(MediaProfile::Audio),
-        Some(value) if value.starts_with("video/") => Some(MediaProfile::AudioVideo),
-        Some("application/octet-stream") | None => None,
-        Some(_) => return Err(HttpFault::UnsupportedMediaType),
-    };
-    let extension_profile = headers.filename.as_deref().and_then(|filename| {
-        let extension = filename.rsplit_once('.')?.1.to_ascii_lowercase();
-        match extension.as_str() {
-            "wav" | "mp3" | "flac" | "aac" | "m4a" | "ogg" | "opus" => Some(MediaProfile::Audio),
-            "mp4" | "mov" | "mkv" | "webm" | "avi" => Some(MediaProfile::AudioVideo),
-            _ => None,
-        }
-    });
-    match (content_profile, extension_profile) {
-        (Some(left), Some(right)) if left != right => Err(HttpFault::MalformedRequest),
-        (Some(profile), _) | (None, Some(profile)) => Ok(profile),
-        (None, None) => Err(HttpFault::UnsupportedMediaType),
-    }
 }
 
 fn find(haystack: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
@@ -324,7 +281,7 @@ fn is_token_byte(byte: u8) -> bool {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::{HttpFault, MediaProfile, parse_headers, scan};
+    use super::{HttpFault, parse_headers, scan};
 
     fn body(parts: &[(&str, Option<&str>, &[u8])], close: bool) -> Vec<u8> {
         let mut output = Vec::new();
@@ -370,12 +327,12 @@ mod tests {
             let facts = scan(&body(&parts, true), b"route-boundary")
                 .expect("valid complete multipart body");
             assert_eq!(facts.model.as_deref(), Some("asr"));
-            assert_eq!(facts.media_profile, MediaProfile::Audio);
+            assert_eq!(facts.model.as_deref(), Some("asr"));
         }
     }
 
     #[test]
-    fn rejects_duplicate_routing_fields_malformed_closure_and_identity_conflict() {
+    fn duplicate_routing_fields_are_last_wins() {
         let duplicate = body(
             &[
                 ("model", None, b"a"),
@@ -385,19 +342,23 @@ mod tests {
             true,
         );
         assert_eq!(
-            scan(&duplicate, b"route-boundary"),
-            Err(HttpFault::MalformedRequest)
+            scan(&duplicate, b"route-boundary")
+                .expect("duplicate form fields use worker-compatible last-wins parsing")
+                .model
+                .as_deref(),
+            Some("b")
         );
+    }
+
+    #[test]
+    fn rejects_malformed_closure_and_accepts_unknown_file_media_type() {
         let malformed = body(&[("file", Some("audio/wav"), b"RIFF")], false);
         assert_eq!(
             scan(&malformed, b"route-boundary"),
             Err(HttpFault::MalformedRequest)
         );
-        let conflict = body(&[("file", Some("video/mp4"), b"data")], true);
-        assert_eq!(
-            scan(&conflict, b"route-boundary"),
-            Err(HttpFault::MalformedRequest)
-        );
+        let unknown = body(&[("file", Some("application/x-custom"), b"data")], true);
+        assert!(scan(&unknown, b"route-boundary").is_ok());
     }
 
     #[test]
@@ -488,13 +449,13 @@ mod tests {
             br#"Content-Disposition: form-data; name="file"; filename="sample;one.wav""#,
         )
         .expect("quoted filename semicolon");
-        assert_eq!(headers.filename.as_deref(), Some("sample;one.wav"));
+        assert_eq!(headers.name.as_deref(), Some("file"));
 
         let escaped = parse_headers(
             br#"Content-Disposition: form-data; name="file"; filename="sample\";one.wav""#,
         )
         .expect("escaped quote in filename");
-        assert_eq!(escaped.filename.as_deref(), Some("sample\";one.wav"));
+        assert_eq!(escaped.name.as_deref(), Some("file"));
 
         assert_eq!(
             parse_headers(

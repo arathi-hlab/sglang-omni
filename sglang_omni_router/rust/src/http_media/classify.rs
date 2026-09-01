@@ -4,14 +4,14 @@ use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor
 
 use crate::error::HttpFault;
 use crate::speech_facts::{
-    SpeechFields, effective_reference_forms, exceeds_nesting_limit,
-    managed_voice as classify_managed_voice, read_field as read_speech_field, reference_forms,
-    response_format as classify_response_format, task as classify_task,
+    SpeechFields, effective_reference_forms, managed_voice as classify_managed_voice,
+    read_field as read_speech_field, reference_forms, response_format as classify_response_format,
+    task as classify_task,
 };
 use crate::worker_pool::{
-    BatchFeature, DefaultModelResolution, ModelSelection, ProfileRequirement, ReferenceForm,
-    RouteRequirement, ServiceClass, SpeechResponseFormat, SpeechToTextTask, StreamMode,
-    TranscriptionResponseFormat, TrustDomain, WorkerPool,
+    DefaultModelResolution, ModelSelection, ProfileRequirement, ReferenceForm, RouteRequirement,
+    ServiceClass, SpeechResponseFormat, SpeechToTextTask, StreamMode, TranscriptionResponseFormat,
+    TrustDomain, WorkerPool,
 };
 
 use super::headers::SuccessProfile;
@@ -66,14 +66,12 @@ pub(super) fn speech_with_hints(
     } else {
         StreamMode::NonStreaming
     };
-    let task = classify_task(
-        fields
-            .task
-            .as_ref()
-            .and_then(Option::as_deref)
-            .unwrap_or("Base"),
-    )
-    .ok_or(HttpFault::MalformedRequest)?;
+    let task = fields
+        .task
+        .as_ref()
+        .and_then(Option::as_deref)
+        .map(|value| classify_task(value).ok_or(HttpFault::MalformedRequest))
+        .transpose()?;
     let references = reference_forms(&fields);
     let managed_voice = classify_managed_voice(&fields, &references);
     Ok(Classified {
@@ -123,27 +121,23 @@ pub(super) fn batch_with_hints(
     let mut formats = Vec::new();
     let mut tasks = Vec::new();
     let mut references = Vec::new();
-    let mut features = Vec::new();
+    let default_format = classify_response_format(
+        defaults
+            .response_format
+            .as_ref()
+            .and_then(Option::as_deref)
+            .unwrap_or("wav"),
+    )
+    .ok_or(HttpFault::MalformedRequest)?;
+    let default_task = defaults
+        .task
+        .as_ref()
+        .and_then(Option::as_deref)
+        .map(|value| classify_task(value).ok_or(HttpFault::MalformedRequest))
+        .transpose()?;
     let default_references = reference_forms(&defaults);
     let mut managed_voice = classify_managed_voice(&defaults, &default_references);
     for item in items {
-        if item.model.as_ref().is_some_and(Option::is_some) {
-            insert_once(&mut features, BatchFeature::Model);
-        }
-        if item.response_format.as_ref().is_some_and(Option::is_some) {
-            insert_once(&mut features, BatchFeature::Format);
-        }
-        if item.task.as_ref().is_some_and(Option::is_some) {
-            insert_once(&mut features, BatchFeature::Task);
-        }
-        if item.ref_audio.as_ref().is_some_and(Option::is_some)
-            || item.references.as_ref().is_some_and(Option::is_some)
-        {
-            insert_once(&mut features, BatchFeature::Reference);
-        }
-        if item.voice.as_ref().is_some_and(Option::is_some) {
-            insert_once(&mut features, BatchFeature::Voice);
-        }
         let effective_model = item
             .model
             .clone()
@@ -157,26 +151,26 @@ pub(super) fn batch_with_hints(
             ServiceClass::SpeechBatch,
             None,
         )?);
-        let format = classify_response_format(
-            item.response_format
-                .clone()
-                .flatten()
-                .or_else(|| defaults.response_format.clone().flatten())
-                .as_deref()
-                .unwrap_or("wav"),
-        )
-        .ok_or(HttpFault::MalformedRequest)?;
-        insert_once(&mut formats, format);
-        let task = classify_task(
-            item.task
-                .clone()
-                .flatten()
-                .or_else(|| defaults.task.clone().flatten())
-                .as_deref()
-                .unwrap_or("Base"),
-        )
-        .ok_or(HttpFault::MalformedRequest)?;
-        insert_once(&mut tasks, task);
+        match item.response_format.as_ref().and_then(Option::as_deref) {
+            Some(value) => {
+                if let Some(format) = classify_response_format(value) {
+                    insert_once(&mut formats, format);
+                }
+            }
+            None => insert_once(&mut formats, default_format),
+        }
+        match item.task.as_ref().and_then(Option::as_deref) {
+            Some(value) => {
+                if let Some(task) = classify_task(value) {
+                    insert_once(&mut tasks, task);
+                }
+            }
+            None => {
+                if let Some(task) = default_task {
+                    insert_once(&mut tasks, task);
+                }
+            }
+        }
         let effective_references = effective_reference_forms(&defaults, &item);
         let explicit_reference = effective_references != [ReferenceForm::None];
         for form in effective_references {
@@ -201,7 +195,6 @@ pub(super) fn batch_with_hints(
                 reference_forms: references,
                 managed_voice,
                 batch_size,
-                effective_features: features,
             },
             trust.clone(),
         ),
@@ -310,7 +303,6 @@ fn speech_to_text(
                 model,
                 task,
                 response_format: format,
-                media_profile: facts.media_profile,
                 stream_mode: if stream {
                     StreamMode::Streaming
                 } else {
@@ -373,9 +365,6 @@ fn parse_batch(bytes: &[u8]) -> Result<(SpeechFields, Vec<SpeechFields>), HttpFa
 }
 
 fn parse(bytes: &[u8], mode: RootMode) -> Result<(SpeechFields, Vec<SpeechFields>), HttpFault> {
-    if exceeds_nesting_limit(bytes) {
-        return Err(HttpFault::MalformedRequest);
-    }
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let parsed = RootSeed(mode)
         .deserialize(&mut deserializer)
@@ -422,9 +411,9 @@ impl<'de> Visitor<'de> for RootVisitor {
         let mut items = None;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
-                "stream" => set_once(&mut fields.stream, map.next_value()?, "stream")?,
+                "stream" => fields.stream = Some(map.next_value()?),
                 "items" if matches!(self.0, RootMode::Batch) => {
-                    set_once(&mut items, map.next_value_seed(ItemsSeed)?, "items")?
+                    items = Some(map.next_value_seed(ItemsSeed)?)
                 }
                 _ => {
                     if !read_speech_field(&key, &mut map, &mut fields)? {
@@ -508,17 +497,6 @@ impl<'de> DeserializeSeed<'de> for ItemSeed {
     }
 }
 
-fn set_once<E, T>(slot: &mut Option<T>, value: T, field: &'static str) -> Result<(), E>
-where
-    E: de::Error,
-{
-    if slot.is_some() {
-        return Err(E::duplicate_field(field));
-    }
-    *slot = Some(value);
-    Ok(())
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
@@ -527,8 +505,8 @@ mod tests {
 
     use crate::config::Config;
     use crate::worker_pool::{
-        BatchFeature, ModelSelection, ProfileRequirement, ReferenceForm, SpeechResponseFormat,
-        SpeechTask, StreamMode, TrustDomain, WorkerPool,
+        ModelSelection, ProfileRequirement, ReferenceForm, SpeechResponseFormat, SpeechTask,
+        StreamMode, TrustDomain, WorkerPool,
     };
 
     use super::{HttpFault, batch, merge_stream, speech, speech_with_hints};
@@ -610,13 +588,11 @@ tasks = ["text_to_speech", "voice_clone", "voice_design"]
 reference_forms = ["none", "direct", "list", "vq_codes"]
 managed_voice = false
 max_batch_size = 16
-effective_features = ["model", "format", "task", "reference", "voice"]
 [[workers.service_profiles]]
 service = "transcription_http"
 model_ids = ["tts", "other"]
 task = "transcribe"
 response_formats = ["json", "text", "verbose_json", "srt", "vtt", "sse"]
-media_profiles = ["audio", "audio_video"]
 stream_modes = ["non_streaming", "streaming"]
 "#;
         fs::write(&path, config).expect("write classifier config");
@@ -661,7 +637,7 @@ stream_modes = ["non_streaming", "streaming"]
             panic!("speech requirement")
         };
         assert_eq!(*stream_mode, StreamMode::Streaming);
-        assert_eq!(*task, SpeechTask::VoiceClone);
+        assert_eq!(*task, Some(SpeechTask::VoiceClone));
         assert_eq!(
             reference_forms,
             &[
@@ -671,14 +647,40 @@ stream_modes = ["non_streaming", "streaming"]
             ]
         );
         assert!(!managed_voice);
-        assert_eq!(
-            speech(br#"{"model":"a","model":"b","input":"x"}"#, &pool, &trust).err(),
-            Some(HttpFault::MalformedRequest)
-        );
+        let duplicate = speech(br#"{"model":"a","model":"tts","input":"x"}"#, &pool, &trust)
+            .expect("duplicate JSON fields use last-wins parsing");
+        let ProfileRequirement::SpeechHttp { model, .. } = duplicate.requirement.profile() else {
+            panic!("speech requirement")
+        };
+        assert_eq!(model.model_id(), "tts");
     }
 
     #[test]
-    fn batch_builds_whole_ordered_effective_unions_and_features() {
+    fn speech_preserves_worker_owned_alias_reference_and_task_semantics() {
+        let pool = pool();
+        let trust = TrustDomain::new(String::from("local"));
+        for body in [
+            br#"{"model":"tts","voice":"default","speaker":"named","references":[{}]}"#.as_slice(),
+            br#"{"model":"tts","speaker":"named","voice":"default","references":[{}]}"#.as_slice(),
+        ] {
+            let classified = speech(body, &pool, &trust).expect("classify worker-owned fields");
+            let ProfileRequirement::SpeechHttp {
+                task,
+                reference_forms,
+                managed_voice,
+                ..
+            } = classified.requirement.profile()
+            else {
+                panic!("speech requirement")
+            };
+            assert_eq!(*task, None);
+            assert_eq!(reference_forms, &[ReferenceForm::List]);
+            assert!(!managed_voice, "voice takes precedence over speaker");
+        }
+    }
+
+    #[test]
+    fn batch_builds_whole_ordered_effective_unions() {
         let pool = pool();
         let trust = TrustDomain::new(String::from("local"));
         let body = br#"{
@@ -697,7 +699,6 @@ stream_modes = ["non_streaming", "streaming"]
             reference_forms,
             managed_voice,
             batch_size,
-            effective_features,
         } = classified.requirement.profile()
         else {
             panic!("batch requirement")
@@ -725,16 +726,6 @@ stream_modes = ["non_streaming", "streaming"]
             !managed_voice,
             "explicit references avoid managed voice routing"
         );
-        assert_eq!(
-            effective_features,
-            &[
-                BatchFeature::Model,
-                BatchFeature::Format,
-                BatchFeature::Task,
-                BatchFeature::Reference,
-                BatchFeature::Voice,
-            ]
-        );
     }
 
     #[test]
@@ -759,6 +750,42 @@ stream_modes = ["non_streaming", "streaming"]
     }
 
     #[test]
+    fn batch_item_validation_remains_worker_owned() {
+        let pool = pool();
+        let trust = TrustDomain::new(String::from("local"));
+        let classified = batch(
+            br#"{
+                "model":"tts",
+                "items":[{"input":"bad","response_format":"unknown","task_type":"unknown"}]
+            }"#,
+            &pool,
+            &trust,
+        )
+        .expect("invalid item fields become worker-owned per-item failures");
+        let ProfileRequirement::SpeechBatch {
+            response_formats,
+            tasks,
+            ..
+        } = classified.requirement.profile()
+        else {
+            panic!("batch requirement")
+        };
+        assert!(response_formats.is_empty());
+        assert!(tasks.is_empty());
+
+        assert_eq!(
+            batch(
+                br#"{"model":"tts","response_format":"unknown","items":[{"input":"x"}]}"#,
+                &pool,
+                &trust,
+            )
+            .err(),
+            Some(HttpFault::MalformedRequest),
+            "invalid batch defaults reject the complete request at the worker"
+        );
+    }
+
+    #[test]
     fn batch_reference_overrides_follow_exclude_none_semantics() {
         let pool = pool();
         let trust = TrustDomain::new(String::from("local"));
@@ -774,9 +801,7 @@ stream_modes = ["non_streaming", "streaming"]
         )
         .expect("null item references inherit batch defaults");
         let ProfileRequirement::SpeechBatch {
-            reference_forms,
-            effective_features,
-            ..
+            reference_forms, ..
         } = inherited.requirement.profile()
         else {
             panic!("batch requirement")
@@ -785,7 +810,6 @@ stream_modes = ["non_streaming", "streaming"]
             reference_forms,
             &[ReferenceForm::Direct, ReferenceForm::List]
         );
-        assert!(!effective_features.contains(&BatchFeature::Reference));
 
         let suppressed = batch(
             br#"{
@@ -798,15 +822,12 @@ stream_modes = ["non_streaming", "streaming"]
         )
         .expect("empty item reference list overrides batch default");
         let ProfileRequirement::SpeechBatch {
-            reference_forms,
-            effective_features,
-            ..
+            reference_forms, ..
         } = suppressed.requirement.profile()
         else {
             panic!("batch requirement")
         };
         assert_eq!(reference_forms, &[ReferenceForm::None]);
-        assert!(effective_features.contains(&BatchFeature::Reference));
     }
 
     #[test]

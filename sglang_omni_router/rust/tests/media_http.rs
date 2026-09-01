@@ -368,13 +368,13 @@ fn media_profile(route: MediaRoute, speech_formats: &str, speech_to_text_formats
             "[[workers.service_profiles]]\nservice = \"speech_http\"\nmodel_ids = [\"tts\"]\nresponse_formats = {speech_formats}\nstream_modes = [\"non_streaming\"]\ntasks = [\"text_to_speech\", \"voice_clone\", \"voice_design\"]\nreference_forms = [\"none\", \"direct\", \"list\", \"vq_codes\"]\nmanaged_voice = false\n\n[[workers.service_profiles]]\nservice = \"speech_http\"\nmodel_ids = [\"tts\"]\nresponse_formats = [\"pcm\"]\nstream_modes = [\"non_streaming\", \"streaming\"]\ntasks = [\"text_to_speech\", \"voice_clone\", \"voice_design\"]\nreference_forms = [\"none\", \"direct\", \"list\", \"vq_codes\"]\nmanaged_voice = false\n"
         ),
         MediaRoute::SpeechBatch => String::from(
-            "[[workers.service_profiles]]\nservice = \"speech_batch\"\nmodel_ids = [\"tts\"]\nresponse_formats = [\"mp3\", \"opus\", \"aac\", \"flac\", \"wav\", \"pcm\"]\ntasks = [\"text_to_speech\", \"voice_clone\", \"voice_design\"]\nreference_forms = [\"none\", \"direct\", \"list\", \"vq_codes\"]\nmanaged_voice = false\nmax_batch_size = 16\neffective_features = [\"model\", \"format\", \"task\", \"reference\", \"voice\"]\n",
+            "[[workers.service_profiles]]\nservice = \"speech_batch\"\nmodel_ids = [\"tts\"]\nresponse_formats = [\"mp3\", \"opus\", \"aac\", \"flac\", \"wav\", \"pcm\"]\ntasks = [\"text_to_speech\", \"voice_clone\", \"voice_design\"]\nreference_forms = [\"none\", \"direct\", \"list\", \"vq_codes\"]\nmanaged_voice = false\nmax_batch_size = 16\n",
         ),
         MediaRoute::Transcription => format!(
-            "[[workers.service_profiles]]\nservice = \"transcription_http\"\nmodel_ids = [\"tts\", \"asr\"]\ntask = \"transcribe\"\nresponse_formats = {speech_to_text_formats}\nmedia_profiles = [\"audio\", \"audio_video\"]\nstream_modes = [\"non_streaming\", \"streaming\"]\n",
+            "[[workers.service_profiles]]\nservice = \"transcription_http\"\nmodel_ids = [\"tts\", \"asr\"]\ntask = \"transcribe\"\nresponse_formats = {speech_to_text_formats}\nstream_modes = [\"non_streaming\", \"streaming\"]\n",
         ),
         MediaRoute::Translation => format!(
-            "[[workers.service_profiles]]\nservice = \"transcription_http\"\nmodel_ids = [\"tts\", \"asr\"]\ntask = \"translate\"\nresponse_formats = {speech_to_text_formats}\nmedia_profiles = [\"audio\", \"audio_video\"]\nstream_modes = [\"non_streaming\", \"streaming\"]\n",
+            "[[workers.service_profiles]]\nservice = \"transcription_http\"\nmodel_ids = [\"tts\", \"asr\"]\ntask = \"translate\"\nresponse_formats = {speech_to_text_formats}\nstream_modes = [\"non_streaming\", \"streaming\"]\n",
         ),
     }
 }
