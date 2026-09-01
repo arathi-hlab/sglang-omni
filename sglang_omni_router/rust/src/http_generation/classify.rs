@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
 use crate::error::HttpFault;
 use crate::worker_pool::profile::{InputModality, OutputModality, StreamMode};
@@ -9,15 +9,9 @@ use crate::worker_pool::{
     ProfileRequirement, RouteRequirement, ServiceClass, TrustDomain, WorkerPool,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ExpectedSuccess {
-    Json,
-    Sse,
-}
-
+/// Worker-eligibility facts derived without reconstructing the request body.
 pub(crate) struct ClassifiedRequest {
     pub(crate) requirement: RouteRequirement,
-    pub(crate) expected_success: ExpectedSuccess,
 }
 
 #[derive(Default)]
@@ -34,7 +28,6 @@ struct Facts {
 
 #[derive(Default)]
 struct MessageFacts {
-    count: usize,
     string: bool,
     typed: bool,
     text: bool,
@@ -44,14 +37,12 @@ struct MessageFacts {
     typed_media: bool,
 }
 
+/// Extracts routing facts while leaving worker-owned request validation upstream.
 pub(crate) fn classify(
     bytes: &[u8],
     pool: &WorkerPool,
     trust: &TrustDomain,
 ) -> Result<ClassifiedRequest, HttpFault> {
-    if exceeds_nesting_limit(bytes) {
-        return Err(HttpFault::MalformedRequest);
-    }
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let facts = RootSeed
         .deserialize(&mut deserializer)
@@ -60,12 +51,8 @@ pub(crate) fn classify(
         .end()
         .map_err(|_| HttpFault::MalformedRequest)?;
 
-    let messages = facts.messages.ok_or(HttpFault::MalformedRequest)?;
-    if messages.count == 0 {
-        return Err(HttpFault::MalformedRequest);
-    }
+    let messages = facts.messages.unwrap_or_default();
     let model = match facts.model.flatten() {
-        Some(model) if model.is_empty() => return Err(HttpFault::MalformedRequest),
         Some(model) => ModelSelection::Explicit(model),
         None => match pool.resolve_default_model_id(trust, ServiceClass::GenerationHttp) {
             DefaultModelResolution::Unique(model) => ModelSelection::WorkerDefault {
@@ -119,11 +106,6 @@ pub(crate) fn classify(
     } else {
         StreamMode::NonStreaming
     };
-    let expected_success = if stream_mode == StreamMode::Streaming {
-        ExpectedSuccess::Sse
-    } else {
-        ExpectedSuccess::Json
-    };
     Ok(ClassifiedRequest {
         requirement: RouteRequirement::new(
             ProfileRequirement::GenerationHttp {
@@ -137,38 +119,7 @@ pub(crate) fn classify(
             },
             trust.clone(),
         ),
-        expected_success,
     })
-}
-
-fn exceeds_nesting_limit(bytes: &[u8]) -> bool {
-    let mut depth = 0_u16;
-    let mut in_string = false;
-    let mut escaped = false;
-    for byte in bytes {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if *byte == b'\\' {
-                escaped = true;
-            } else if *byte == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match *byte {
-            b'"' => in_string = true,
-            b'{' | b'[' => {
-                depth = depth.saturating_add(1);
-                if depth > 128 {
-                    return true;
-                }
-            }
-            b'}' | b']' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    false
 }
 
 struct RootSeed;
@@ -198,40 +149,18 @@ impl<'de> Visitor<'de> for RootVisitor {
         A: MapAccess<'de>,
     {
         let mut facts = Facts::default();
-        let mut seen_audios = false;
-        let mut seen_images = false;
-        let mut seen_videos = false;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
-                "model" => set_once(&mut facts.model, map.next_value()?, "model")?,
-                "messages" => set_once(
-                    &mut facts.messages,
-                    map.next_value_seed(MessagesSeed)?,
-                    "messages",
-                )?,
-                "audios" => {
-                    reject_seen(&mut seen_audios, "audios")?;
-                    facts.top_audio = map.next_value_seed(NonEmptyArraySeed)?;
+                "model" => facts.model = Some(map.next_value_seed(ScalarFactSeed)?.into_string()),
+                "messages" => facts.messages = Some(map.next_value_seed(MessagesSeed)?),
+                "audios" => facts.top_audio = map.next_value_seed(NonEmptyArraySeed)?,
+                "images" => facts.top_image = map.next_value_seed(NonEmptyArraySeed)?,
+                "videos" => facts.top_video = map.next_value_seed(NonEmptyArraySeed)?,
+                "modalities" => {
+                    facts.modalities = Some(map.next_value_seed(NullableModalitiesSeed)?)
                 }
-                "images" => {
-                    reject_seen(&mut seen_images, "images")?;
-                    facts.top_image = map.next_value_seed(NonEmptyArraySeed)?;
-                }
-                "videos" => {
-                    reject_seen(&mut seen_videos, "videos")?;
-                    facts.top_video = map.next_value_seed(NonEmptyArraySeed)?;
-                }
-                "modalities" => set_once(
-                    &mut facts.modalities,
-                    map.next_value_seed(NullableModalitiesSeed)?,
-                    "modalities",
-                )?,
-                "audio" => set_once(
-                    &mut facts.audio_format,
-                    map.next_value_seed(NullableAudioSeed)?,
-                    "audio",
-                )?,
-                "stream" => set_once(&mut facts.stream, map.next_value()?, "stream")?,
+                "audio" => facts.audio_format = Some(map.next_value_seed(NullableAudioSeed)?),
+                "stream" => facts.stream = map.next_value_seed(ScalarFactSeed)?.into_bool(),
                 _ => {
                     let _ignored = map.next_value::<IgnoredAny>()?;
                 }
@@ -241,26 +170,152 @@ impl<'de> Visitor<'de> for RootVisitor {
     }
 }
 
-fn set_once<E, T>(slot: &mut Option<T>, value: T, field: &'static str) -> Result<(), E>
+fn ignore_sequence<'de, A>(mut sequence: A) -> Result<(), A::Error>
 where
-    E: de::Error,
+    A: SeqAccess<'de>,
 {
-    if slot.is_some() {
-        return Err(E::duplicate_field(field));
-    }
-    *slot = Some(value);
+    while sequence.next_element::<IgnoredAny>()?.is_some() {}
     Ok(())
 }
 
-fn reject_seen<E>(seen: &mut bool, field: &'static str) -> Result<(), E>
+fn ignore_map<'de, A>(mut map: A) -> Result<(), A::Error>
 where
-    E: de::Error,
+    A: MapAccess<'de>,
 {
-    if *seen {
-        return Err(E::duplicate_field(field));
+    while map.next_key::<String>()?.is_some() {
+        let _ignored = map.next_value::<IgnoredAny>()?;
     }
-    *seen = true;
     Ok(())
+}
+
+enum ScalarFact {
+    String(String),
+    Bool(bool),
+    Signed(i64),
+    Unsigned(u64),
+    Float(f64),
+    Other,
+}
+
+impl ScalarFact {
+    fn into_string(self) -> Option<String> {
+        match self {
+            Self::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn into_bool(self) -> Option<bool> {
+        match self {
+            Self::Bool(value) => Some(value),
+            Self::Signed(value) => bool_from_integer(value),
+            Self::Unsigned(value) => bool_from_integer(value),
+            Self::Float(0.0) => Some(false),
+            Self::Float(1.0) => Some(true),
+            Self::String(value) => parse_bool_fact(&value),
+            Self::Float(_) | Self::Other => None,
+        }
+    }
+}
+
+fn bool_from_integer<T>(value: T) -> Option<bool>
+where
+    T: Eq + From<u8>,
+{
+    if value == T::from(0) {
+        Some(false)
+    } else if value == T::from(1) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+struct ScalarFactSeed;
+
+impl<'de> DeserializeSeed<'de> for ScalarFactSeed {
+    type Value = ScalarFact;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ScalarVisitor;
+
+        impl<'de> Visitor<'de> for ScalarVisitor {
+            type Value = ScalarFact;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a scalar or worker-owned value")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(ScalarFact::String(value.to_owned()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(ScalarFact::String(value))
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(ScalarFact::Bool(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(ScalarFact::Signed(value))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(ScalarFact::Unsigned(value))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(ScalarFact::Float(value))
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(ScalarFact::Other)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(ScalarFact::Other)
+            }
+
+            fn visit_seq<A>(self, sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                ignore_sequence(sequence)?;
+                Ok(ScalarFact::Other)
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                ignore_map(map)?;
+                Ok(ScalarFact::Other)
+            }
+        }
+
+        deserializer.deserialize_any(ScalarVisitor)
+    }
+}
+
+fn parse_bool_fact(value: &str) -> Option<bool> {
+    if ["1", "on", "t", "true", "y", "yes"]
+        .iter()
+        .any(|candidate| value.eq_ignore_ascii_case(candidate))
+    {
+        Some(true)
+    } else if ["0", "off", "f", "false", "n", "no"]
+        .iter()
+        .any(|candidate| value.eq_ignore_ascii_case(candidate))
+    {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 struct NonEmptyArraySeed;
@@ -276,7 +331,7 @@ impl<'de> DeserializeSeed<'de> for NonEmptyArraySeed {
         impl<'de> Visitor<'de> for ArrayVisitor {
             type Value = bool;
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("an array")
+                formatter.write_str("an array, null, or worker-owned value")
             }
             fn visit_seq<A>(self, mut seq: A) -> Result<bool, A::Error>
             where
@@ -288,8 +343,44 @@ impl<'de> DeserializeSeed<'de> for NonEmptyArraySeed {
                 }
                 Ok(nonempty)
             }
+
+            fn visit_none<E>(self) -> Result<bool, E> {
+                Ok(false)
+            }
+
+            fn visit_unit<E>(self) -> Result<bool, E> {
+                Ok(false)
+            }
+
+            fn visit_bool<E>(self, _value: bool) -> Result<bool, E> {
+                Ok(false)
+            }
+
+            fn visit_i64<E>(self, _value: i64) -> Result<bool, E> {
+                Ok(false)
+            }
+
+            fn visit_u64<E>(self, _value: u64) -> Result<bool, E> {
+                Ok(false)
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<bool, E> {
+                Ok(false)
+            }
+
+            fn visit_str<E>(self, _value: &str) -> Result<bool, E> {
+                Ok(false)
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<bool, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                ignore_map(map)?;
+                Ok(false)
+            }
         }
-        deserializer.deserialize_seq(ArrayVisitor)
+        deserializer.deserialize_any(ArrayVisitor)
     }
 }
 
@@ -306,7 +397,7 @@ impl<'de> DeserializeSeed<'de> for MessagesSeed {
         impl<'de> Visitor<'de> for MessagesVisitor {
             type Value = MessageFacts;
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a nonempty message array")
+                formatter.write_str("a message array or worker-owned value")
             }
             fn visit_seq<A>(self, mut seq: A) -> Result<MessageFacts, A::Error>
             where
@@ -314,7 +405,6 @@ impl<'de> DeserializeSeed<'de> for MessagesSeed {
             {
                 let mut all = MessageFacts::default();
                 while let Some(message) = seq.next_element_seed(MessageSeed)? {
-                    all.count += 1;
                     all.string |= message.string;
                     all.typed |= message.typed;
                     all.text |= message.text;
@@ -325,8 +415,44 @@ impl<'de> DeserializeSeed<'de> for MessagesSeed {
                 }
                 Ok(all)
             }
+
+            fn visit_none<E>(self) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_unit<E>(self) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_bool<E>(self, _value: bool) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_i64<E>(self, _value: i64) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_u64<E>(self, _value: u64) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_str<E>(self, _value: &str) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<MessageFacts, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                ignore_map(map)?;
+                Ok(MessageFacts::default())
+            }
         }
-        deserializer.deserialize_seq(MessagesVisitor)
+        deserializer.deserialize_any(MessagesVisitor)
     }
 }
 
@@ -352,19 +478,63 @@ impl<'de> DeserializeSeed<'de> for MessageSeed {
                 let mut content = None;
                 while let Some(key) = map.next_key::<String>()? {
                     if key == "content" {
-                        set_once(&mut content, map.next_value_seed(ContentSeed)?, "content")?;
+                        content = Some(map.next_value_seed(ContentSeed)?);
                     } else {
                         let _ignored = map.next_value::<IgnoredAny>()?;
                     }
                 }
-                content.ok_or_else(|| de::Error::missing_field("content"))
+                Ok(content.unwrap_or_default())
+            }
+
+            fn visit_none<E>(self) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_unit<E>(self) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_bool<E>(self, _value: bool) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_i64<E>(self, _value: i64) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_u64<E>(self, _value: u64) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_str<E>(self, _value: &str) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_seq<A>(self, sequence: A) -> Result<MessageFacts, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                ignore_sequence(sequence)?;
+                Ok(MessageFacts::default())
             }
         }
-        deserializer.deserialize_map(MessageVisitor)
+        deserializer.deserialize_any(MessageVisitor)
     }
 }
 
 struct ContentSeed;
+
+fn text_message_facts() -> MessageFacts {
+    MessageFacts {
+        string: true,
+        text: true,
+        ..MessageFacts::default()
+    }
+}
 
 impl<'de> DeserializeSeed<'de> for ContentSeed {
     type Value = MessageFacts;
@@ -380,11 +550,7 @@ impl<'de> DeserializeSeed<'de> for ContentSeed {
                 formatter.write_str("a content string or typed-part array")
             }
             fn visit_str<E>(self, _value: &str) -> Result<MessageFacts, E> {
-                Ok(MessageFacts {
-                    string: true,
-                    text: true,
-                    ..MessageFacts::default()
-                })
+                Ok(text_message_facts())
             }
             fn visit_seq<A>(self, mut seq: A) -> Result<MessageFacts, A::Error>
             where
@@ -403,12 +569,51 @@ impl<'de> DeserializeSeed<'de> for ContentSeed {
                 }
                 Ok(facts)
             }
+
+            fn visit_none<E>(self) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_unit<E>(self) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_bool<E>(self, _value: bool) -> Result<MessageFacts, E> {
+                Ok(text_message_facts())
+            }
+
+            fn visit_i64<E>(self, _value: i64) -> Result<MessageFacts, E> {
+                Ok(text_message_facts())
+            }
+
+            fn visit_u64<E>(self, _value: u64) -> Result<MessageFacts, E> {
+                Ok(text_message_facts())
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<MessageFacts, E> {
+                Ok(text_message_facts())
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<MessageFacts, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                ignore_map(map)?;
+                Ok(text_message_facts())
+            }
         }
         deserializer.deserialize_any(ContentVisitor)
     }
 }
 
 struct PartSeed;
+
+fn text_part_facts() -> MessageFacts {
+    MessageFacts {
+        text: true,
+        ..MessageFacts::default()
+    }
+}
 
 impl<'de> DeserializeSeed<'de> for PartSeed {
     type Value = MessageFacts;
@@ -427,31 +632,96 @@ impl<'de> DeserializeSeed<'de> for PartSeed {
             where
                 A: MapAccess<'de>,
             {
-                let mut part_type: Option<String> = None;
+                let mut part_type: Option<Option<String>> = None;
                 while let Some(key) = map.next_key::<String>()? {
                     if key == "type" {
-                        set_once(&mut part_type, map.next_value()?, "type")?;
+                        part_type = Some(map.next_value_seed(ScalarFactSeed)?.into_string());
                     } else {
                         let _ignored = map.next_value::<IgnoredAny>()?;
                     }
                 }
-                let part_type = part_type.ok_or_else(|| de::Error::missing_field("type"))?;
                 let mut facts = MessageFacts::default();
-                match part_type.as_str() {
-                    "text" => facts.text = true,
-                    "audio_url" | "input_audio" => facts.audio = true,
-                    "image_url" | "image" => facts.image = true,
-                    "video_url" | "video" => facts.video = true,
+                match part_type {
+                    None => facts.text = true,
+                    Some(Some(value)) if value == "text" => facts.text = true,
+                    Some(Some(value)) if matches!(value.as_str(), "audio_url" | "input_audio") => {
+                        facts.audio = true;
+                    }
+                    Some(Some(value)) if matches!(value.as_str(), "image_url" | "image") => {
+                        facts.image = true;
+                    }
+                    Some(Some(value)) if matches!(value.as_str(), "video_url" | "video") => {
+                        facts.video = true;
+                    }
                     _ => {}
                 }
                 Ok(facts)
             }
+
+            fn visit_str<E>(self, _value: &str) -> Result<MessageFacts, E> {
+                Ok(text_part_facts())
+            }
+
+            fn visit_none<E>(self) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_unit<E>(self) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_bool<E>(self, _value: bool) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_i64<E>(self, _value: i64) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_u64<E>(self, _value: u64) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<MessageFacts, E> {
+                Ok(MessageFacts::default())
+            }
+
+            fn visit_seq<A>(self, sequence: A) -> Result<MessageFacts, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                ignore_sequence(sequence)?;
+                Ok(MessageFacts::default())
+            }
         }
-        deserializer.deserialize_map(PartVisitor)
+        deserializer.deserialize_any(PartVisitor)
     }
 }
 
 struct NullableModalitiesSeed;
+
+struct ModalitySeed;
+
+impl<'de> DeserializeSeed<'de> for ModalitySeed {
+    type Value = Option<OutputModality>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(
+            match ScalarFactSeed
+                .deserialize(deserializer)?
+                .into_string()
+                .as_deref()
+            {
+                Some("text") => Some(OutputModality::Text),
+                Some("audio") => Some(OutputModality::Audio),
+                _ => None,
+            },
+        )
+    }
+}
 
 impl<'de> DeserializeSeed<'de> for NullableModalitiesSeed {
     type Value = Vec<OutputModality>;
@@ -464,7 +734,7 @@ impl<'de> DeserializeSeed<'de> for NullableModalitiesSeed {
         impl<'de> Visitor<'de> for ModalitiesVisitor {
             type Value = Vec<OutputModality>;
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("null or an output-modality array")
+                formatter.write_str("an output-modality array or worker-owned value")
             }
             fn visit_none<E>(self) -> Result<Self::Value, E> {
                 Ok(Vec::new())
@@ -483,21 +753,45 @@ impl<'de> DeserializeSeed<'de> for NullableModalitiesSeed {
                 A: SeqAccess<'de>,
             {
                 let mut result = Vec::with_capacity(2);
-                while let Some(value) = seq.next_element::<String>()? {
-                    let modality = match value.as_str() {
-                        "text" => OutputModality::Text,
-                        "audio" => OutputModality::Audio,
-                        _ => return Err(de::Error::custom("unknown output modality")),
-                    };
-                    if result.contains(&modality) {
-                        return Err(de::Error::custom("duplicate output modality"));
+                while let Some(modality) = seq.next_element_seed(ModalitySeed)? {
+                    if let Some(modality) = modality
+                        && !result.contains(&modality)
+                    {
+                        result.push(modality);
                     }
-                    result.push(modality);
                 }
                 Ok(result)
             }
+
+            fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+                Ok(Vec::new())
+            }
+
+            fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+                Ok(Vec::new())
+            }
+
+            fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+                Ok(Vec::new())
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+                Ok(Vec::new())
+            }
+
+            fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+                Ok(Vec::new())
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                ignore_map(map)?;
+                Ok(Vec::new())
+            }
         }
-        deserializer.deserialize_option(ModalitiesVisitor)
+        deserializer.deserialize_any(ModalitiesVisitor)
     }
 }
 
@@ -514,7 +808,7 @@ impl<'de> DeserializeSeed<'de> for NullableAudioSeed {
         impl<'de> Visitor<'de> for AudioVisitor {
             type Value = Option<ChatAudioFormat>;
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("null or an audio configuration object")
+                formatter.write_str("an audio configuration object or worker-owned value")
             }
             fn visit_none<E>(self) -> Result<Self::Value, E> {
                 Ok(None)
@@ -535,7 +829,7 @@ impl<'de> DeserializeSeed<'de> for NullableAudioSeed {
                 let mut format: Option<Option<String>> = None;
                 while let Some(key) = map.next_key::<String>()? {
                     if key == "format" {
-                        set_once(&mut format, map.next_value()?, "format")?;
+                        format = Some(map.next_value_seed(ScalarFactSeed)?.into_string());
                     } else {
                         let _ignored = map.next_value::<IgnoredAny>()?;
                     }
@@ -550,12 +844,40 @@ impl<'de> DeserializeSeed<'de> for NullableAudioSeed {
                     "pcm" => ChatAudioFormat::Pcm,
                     "aac" => ChatAudioFormat::Aac,
                     "opus" => ChatAudioFormat::Opus,
-                    _ => return Err(de::Error::custom("unknown audio format")),
+                    _ => return Ok(None),
                 };
                 Ok(Some(value))
             }
+
+            fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_seq<A>(self, sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                ignore_sequence(sequence)?;
+                Ok(None)
+            }
         }
-        deserializer.deserialize_option(AudioVisitor)
+        deserializer.deserialize_any(AudioVisitor)
     }
 }
 
@@ -571,7 +893,7 @@ mod tests {
     use crate::config::Config;
     use crate::worker_pool::WorkerPool;
 
-    use super::{ClassifiedRequest, ExpectedSuccess, HttpFault, TrustDomain, classify};
+    use super::{ClassifiedRequest, HttpFault, TrustDomain, classify};
 
     static NEXT_CONFIG: AtomicU64 = AtomicU64::new(0);
 
@@ -626,8 +948,8 @@ stream_modes = ["non_streaming", "streaming"]
         WorkerPool::build(&config).expect("build classifier pool")
     }
 
-    fn classify_with(body: &str, pool: &WorkerPool) -> Result<ExpectedSuccess, HttpFault> {
-        classify_full(body.as_bytes(), pool).map(|classified| classified.expected_success)
+    fn classify_with(body: &str, pool: &WorkerPool) -> Result<(), HttpFault> {
+        classify_full(body.as_bytes(), pool).map(drop)
     }
 
     fn classify_full(bytes: &[u8], pool: &WorkerPool) -> Result<ClassifiedRequest, HttpFault> {
@@ -660,7 +982,7 @@ stream_modes = ["non_streaming", "streaming"]
         let pool = pool("");
         for model in ["", r#","model":null"#, r#","model":"omni""#] {
             let body = format!(r#"{{"messages":[{{"content":"hello"}}]{model}}}"#);
-            assert_eq!(classify_with(&body, &pool), Ok(ExpectedSuccess::Json));
+            assert_eq!(classify_with(&body, &pool), Ok(()));
         }
         for modalities in ["", r#","modalities":null"#, r#","modalities":[]"#] {
             let body = format!(r#"{{"messages":[{{"content":"hello"}}]{modalities}}}"#);
@@ -671,7 +993,7 @@ stream_modes = ["non_streaming", "streaming"]
                 r#"{"messages":[{"content":"hello"}],"modalities":["audio"],"audio":null,"stream":true}"#,
                 &pool,
             ),
-            Ok(ExpectedSuccess::Sse)
+            Ok(())
         );
     }
 
@@ -694,31 +1016,38 @@ stream_modes = ["non_streaming", "streaming"]
     }
 
     #[test]
-    fn only_routing_duplicates_and_invalid_routing_values_are_rejected() {
+    fn worker_owned_values_do_not_change_request_acceptance() {
         let pool = pool("");
-        let rejected = [
+        let accepted = [
             r#"{"model":"omni","model":"omni","messages":[{"content":"x"}]}"#,
             r#"{"messages":[{"content":"x","content":"y"}]}"#,
             r#"{"messages":[{"content":[{"type":"text","type":"text"}]}]}"#,
             r#"{"messages":[{"content":"x"}],"modalities":["audio"],"audio":{"format":"wav","format":"wav"}}"#,
             r#"{"messages":[]}"#,
             r#"{"model":"","messages":[{"content":"x"}]}"#,
+            r#"{"messages":[{}]}"#,
             r#"{"messages":[{"content":null}]}"#,
             r#"{"messages":[{"content":3}]}"#,
             r#"{"messages":[{"content":{}}]}"#,
             r#"{"messages":[{"content":["raw"]}]}"#,
+            r#"{"messages":[{"content":[{}]}]}"#,
             r#"{"messages":[{"content":"x"}],"modalities":["text","text"]}"#,
             r#"{"messages":[{"content":"x"}],"modalities":["video"]}"#,
             r#"{"messages":[{"content":"x"}],"stream":"true"}"#,
+            r#"{"messages":[{"content":"x"}],"stream":1}"#,
+            r#"{"messages":[{"content":"x"}],"audios":null}"#,
             r#"{"messages":[{"content":"x"}],"audios":{}}"#,
-            r#"{"messages":[{"content":"x"}]} trailing"#,
         ];
-        for request in rejected {
-            assert_eq!(
-                classify_with(request, &pool),
-                Err(HttpFault::MalformedRequest)
+        for request in accepted {
+            assert!(
+                classify_with(request, &pool).is_ok(),
+                "worker-owned request was rejected: {request}"
             );
         }
+        assert_eq!(
+            classify_with(r#"{"messages":[{"content":"x"}]} trailing"#, &pool),
+            Err(HttpFault::MalformedRequest)
+        );
         assert!(
             classify_with(
                 r#"{"messages":[{"content":"x"}],"vendor":{"temperature":1,"temperature":2}}"#,
@@ -744,17 +1073,14 @@ stream_modes = ["non_streaming", "streaming"]
     }
 
     #[test]
-    fn nesting_limit_and_ambiguous_default_fail_closed() {
+    fn ignored_nesting_is_iterative_and_ambiguous_defaults_fail_closed() {
         let base_pool = pool("");
         let nested = format!(
             "{{\"messages\":[{{\"content\":\"x\"}}],\"ignored\":{}0{}}}",
             "[".repeat(129),
             "]".repeat(129)
         );
-        assert_eq!(
-            classify_with(&nested, &base_pool),
-            Err(HttpFault::MalformedRequest)
-        );
+        assert!(classify_with(&nested, &base_pool).is_ok());
         let second = r#"
 [[workers]]
 worker_id = "worker-b"
@@ -808,7 +1134,6 @@ stream_modes = ["non_streaming", "streaming"]
             let classified = classify_full(request.as_bytes(), &pool)
                 .expect("every root permutation must classify");
             assert_eq!(classified.requirement, baseline.requirement);
-            assert_eq!(classified.expected_success, baseline.expected_success);
         }
 
         for width in [1, 2, 3, 7, 31, requests[0].len()] {
@@ -819,27 +1144,57 @@ stream_modes = ["non_streaming", "streaming"]
                 .collect();
             let classified = classify_full(&replay, &pool).expect("chunk replay must classify");
             assert_eq!(classified.requirement, baseline.requirement);
-            assert_eq!(classified.expected_success, baseline.expected_success);
         }
     }
 
     #[test]
-    fn routing_duplicate_corpus_and_nesting_boundaries_replay_deterministically() {
+    fn routing_duplicates_use_the_last_value_and_replay_deterministically() {
         let pool = pool("");
-        let duplicates = [
-            r#"{"model":"omni","model":"other","messages":[{"content":"x"}]}"#,
-            r#"{"messages":[{"content":"x"}],"messages":[{"content":"y"}]}"#,
-            r#"{"messages":[{"content":"x"}],"audios":[],"audios":[1]}"#,
-            r#"{"messages":[{"content":"x"}],"images":[],"images":[1]}"#,
-            r#"{"messages":[{"content":"x"}],"videos":[],"videos":[1]}"#,
-            r#"{"messages":[{"content":"x"}],"modalities":[],"modalities":["text"]}"#,
-            r#"{"messages":[{"content":"x"}],"audio":null,"audio":{"format":"wav"}}"#,
-            r#"{"messages":[{"content":"x"}],"stream":false,"stream":true}"#,
-            r#"{"messages":[{"content":"x","content":"y"}]}"#,
-            r#"{"messages":[{"content":[{"type":"text","type":"image"}]}]}"#,
-            r#"{"messages":[{"content":"x"}],"modalities":["audio"],"audio":{"format":"wav","format":"opus"}}"#,
+        let cases = [
+            (
+                r#"{"model":"other","model":"omni","messages":[{"content":"x"}]}"#,
+                r#"{"model":"omni","messages":[{"content":"x"}]}"#,
+            ),
+            (
+                r#"{"messages":[{"content":[{"type":"image"}]}],"messages":[{"content":"y"}]}"#,
+                r#"{"messages":[{"content":"y"}]}"#,
+            ),
+            (
+                r#"{"messages":[{"content":"x"}],"audios":[],"audios":[1]}"#,
+                r#"{"messages":[{"content":"x"}],"audios":[1]}"#,
+            ),
+            (
+                r#"{"messages":[{"content":"x"}],"images":[],"images":[1]}"#,
+                r#"{"messages":[{"content":"x"}],"images":[1]}"#,
+            ),
+            (
+                r#"{"messages":[{"content":"x"}],"videos":[],"videos":[1]}"#,
+                r#"{"messages":[{"content":"x"}],"videos":[1]}"#,
+            ),
+            (
+                r#"{"messages":[{"content":"x"}],"modalities":["audio"],"modalities":["text"]}"#,
+                r#"{"messages":[{"content":"x"}],"modalities":["text"]}"#,
+            ),
+            (
+                r#"{"messages":[{"content":"x"}],"audio":{"format":"opus"},"audio":{"format":"wav"}}"#,
+                r#"{"messages":[{"content":"x"}],"audio":{"format":"wav"}}"#,
+            ),
+            (
+                r#"{"messages":[{"content":"x"}],"stream":false,"stream":true}"#,
+                r#"{"messages":[{"content":"x"}],"stream":true}"#,
+            ),
+            (
+                r#"{"messages":[{"content":[{"type":"image","type":"text"}]}]}"#,
+                r#"{"messages":[{"content":[{"type":"text"}]}]}"#,
+            ),
+            (
+                r#"{"messages":[{"content":"x"}],"modalities":["audio"],"audio":{"format":"wav","format":"opus"}}"#,
+                r#"{"messages":[{"content":"x"}],"modalities":["audio"],"audio":{"format":"opus"}}"#,
+            ),
         ];
-        for request in duplicates {
+        for (request, canonical) in cases {
+            let expected = classify_full(canonical.as_bytes(), &pool)
+                .expect("canonical last-value request must classify");
             for width in [1, 2, 5, request.len()] {
                 let replay: Vec<u8> = request
                     .as_bytes()
@@ -847,23 +1202,24 @@ stream_modes = ["non_streaming", "streaming"]
                     .flat_map(|chunk| chunk.iter().copied())
                     .collect();
                 assert_eq!(
-                    classify_full(&replay, &pool).err(),
-                    Some(HttpFault::MalformedRequest),
-                    "duplicate replay width {width} was accepted: {request}"
+                    classify_full(&replay, &pool)
+                        .expect("last-value request must classify")
+                        .requirement,
+                    expected.requirement,
+                    "duplicate replay width {width} changed: {request}"
                 );
             }
         }
 
-        for (nested_arrays, accepted) in [(126, true), (127, true), (128, false), (129, false)] {
+        for nested_arrays in [128, 129, 512] {
             let request = format!(
                 "{{\"messages\":[{{\"content\":\"x\"}}],\"ignored\":{}0{}}}",
                 "[".repeat(nested_arrays),
                 "]".repeat(nested_arrays)
             );
-            assert_eq!(
+            assert!(
                 classify_full(request.as_bytes(), &pool).is_ok(),
-                accepted,
-                "unexpected result at root plus {nested_arrays} nested arrays"
+                "ignored nesting failed at {nested_arrays} arrays"
             );
         }
     }
@@ -902,6 +1258,11 @@ stream_modes = ["non_streaming", "streaming"]
                 r#"{"messages":[{"content":[{"type":"video"}]}]}"#,
             ],
             &[
+                r#"{"messages":[{"content":[{"type":"text"}]}]}"#,
+                r#"{"messages":[{"content":[{}]}]}"#,
+                r#"{"messages":[{"content":["raw"]}]}"#,
+            ],
+            &[
                 r#"{"messages":[{"content":[]}]}"#,
                 r#"{"messages":[{"content":[{"type":"vendor_future_part"}]}]}"#,
                 r#"{"messages":[{"content":[{"type":"unknown_a"},{"type":"unknown_b"}]}]}"#,
@@ -909,6 +1270,15 @@ stream_modes = ["non_streaming", "streaming"]
             &[
                 r#"{"messages":[{"content":"x"}]}"#,
                 r#"{"messages":[{"content":"x"}],"stream":false}"#,
+            ],
+            &[
+                r#"{"messages":[{"content":"x"}]}"#,
+                r#"{"messages":[{"content":"x"}],"modalities":["video"]}"#,
+                r#"{"messages":[{"content":"x"}],"modalities":["text","text"]}"#,
+            ],
+            &[
+                r#"{"messages":[{"content":"x"}],"modalities":["audio"]}"#,
+                r#"{"messages":[{"content":"x"}],"modalities":["audio"],"audio":{"format":"vendor"}}"#,
             ],
         ];
 
@@ -919,10 +1289,6 @@ stream_modes = ["non_streaming", "streaming"]
                 let classified = classify_full(request.as_bytes(), &pool)
                     .expect("equivalent request must classify");
                 assert_eq!(classified.requirement, baseline.requirement, "{request}");
-                assert_eq!(
-                    classified.expected_success, baseline.expected_success,
-                    "{request}"
-                );
             }
         }
 
@@ -937,7 +1303,19 @@ stream_modes = ["non_streaming", "streaming"]
 
         let streaming = classify_full(br#"{"messages":[{"content":"x"}],"stream":true}"#, &pool)
             .expect("streaming request");
-        assert_eq!(streaming.expected_success, ExpectedSuccess::Sse);
+        for request in [
+            r#"{"messages":[{"content":"x"}],"stream":"true"}"#,
+            r#"{"messages":[{"content":"x"}],"stream":1}"#,
+            r#"{"messages":[{"content":"x"}],"stream":"on"}"#,
+        ] {
+            assert_eq!(
+                classify_full(request.as_bytes(), &pool)
+                    .expect("worker-coercible stream value")
+                    .requirement,
+                streaming.requirement,
+                "{request}"
+            );
+        }
 
         for request in [
             r#"{"model":1,"messages":[{"content":"x"}]}"#,
@@ -947,10 +1325,9 @@ stream_modes = ["non_streaming", "streaming"]
             r#"{"messages":[{"content":"x"}],"stream":1}"#,
             r#"{"messages":[{"content":[{"type":null}]}]}"#,
         ] {
-            assert_eq!(
-                classify_with(request, &pool),
-                Err(HttpFault::MalformedRequest),
-                "wrong routing type was accepted: {request}"
+            assert!(
+                classify_with(request, &pool).is_ok(),
+                "worker-owned routing value was rejected: {request}"
             );
         }
     }
@@ -1021,8 +1398,7 @@ stream_modes = ["non_streaming", "streaming"]
             }
 
             let first = catch_unwind(AssertUnwindSafe(|| {
-                classify_full(&bytes, &pool)
-                    .map(|classified| (classified.requirement, classified.expected_success))
+                classify_full(&bytes, &pool).map(|classified| classified.requirement)
             }));
             assert!(
                 first.is_ok(),
@@ -1030,8 +1406,7 @@ stream_modes = ["non_streaming", "streaming"]
             );
             let first = first.expect("panic result checked above");
             let second = catch_unwind(AssertUnwindSafe(|| {
-                classify_full(&bytes, &pool)
-                    .map(|classified| (classified.requirement, classified.expected_success))
+                classify_full(&bytes, &pool).map(|classified| classified.requirement)
             }));
             assert!(
                 second.is_ok(),

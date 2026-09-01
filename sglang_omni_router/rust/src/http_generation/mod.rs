@@ -20,7 +20,7 @@ use crate::error::{HttpFault, RouterError};
 use crate::request_id::{CanonicalRequestId, REQUEST_ID_HEADER};
 use crate::worker_pool::{AdmissionError, DispatchError, RequestLease, TrustDomain, WorkerPool};
 
-use classify::{ExpectedSuccess, classify};
+use classify::classify;
 use headers::{canonical_content_type, sanitize_response, validate_request};
 use request_body::{BufferedBody, DirectRequestBody, SharedUploadState, UploadState};
 use response_body::DirectResponseBody;
@@ -141,16 +141,7 @@ async fn handle(
         .pool
         .dispatch(admission, &classified.requirement)
         .map_err(map_dispatch)?;
-    relay_buffered(
-        generation,
-        bytes,
-        budget,
-        lease,
-        classified.expected_success,
-        request_id,
-        deadline,
-    )
-    .await
+    relay_buffered(generation, bytes, budget, lease, request_id, deadline).await
 }
 
 fn reserve_budget(
@@ -172,13 +163,15 @@ async fn read_buffered(
     let initial = initial_buffer_capacity(expected);
     let mut output = BytesMut::with_capacity(initial);
     let mut observed = 0_u64;
+    let deadline_timer = tokio::time::sleep_until(deadline);
+    tokio::pin!(deadline_timer);
     loop {
         if tokio::time::Instant::now() >= deadline {
             return Err(HttpFault::RequestTimeout);
         }
         let frame = tokio::select! {
             biased;
-            () = tokio::time::sleep_until(deadline) => return Err(HttpFault::RequestTimeout),
+            () = &mut deadline_timer => return Err(HttpFault::RequestTimeout),
             frame = poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)) => frame,
         };
         match frame {
@@ -215,7 +208,6 @@ async fn relay_buffered(
     bytes: Bytes,
     budget: OwnedSemaphorePermit,
     lease: RequestLease,
-    expected: ExpectedSuccess,
     request_id: HeaderValue,
     deadline: tokio::time::Instant,
 ) -> Result<Response<Body>, HttpFault> {
@@ -226,7 +218,6 @@ async fn relay_buffered(
         OutgoingBody {
             body,
             length,
-            expected: Some(expected),
             upload: None,
         },
         lease,
@@ -251,7 +242,6 @@ async fn relay_direct(
         OutgoingBody {
             body: reqwest::Body::wrap(direct),
             length,
-            expected: None,
             upload: Some(state),
         },
         lease,
@@ -264,7 +254,6 @@ async fn relay_direct(
 struct OutgoingBody {
     body: reqwest::Body,
     length: u64,
-    expected: Option<ExpectedSuccess>,
     upload: Option<SharedUploadState>,
 }
 
@@ -322,7 +311,7 @@ async fn send_once(
     }
     let response: axum::http::Response<reqwest::Body> = response.into();
     let (parts, body) = response.into_parts();
-    let headers = match sanitize_response(parts.status, &parts.headers, outgoing.expected) {
+    let headers = match sanitize_response(parts.status, &parts.headers) {
         Ok(headers) => headers,
         Err(fault) => {
             lease.request_immediate_probe();
@@ -481,7 +470,7 @@ mod tests {
     use super::{
         HttpFault, SharedUploadState, UploadState, authorize_upstream_attempt_at, deadline_outcome,
         finish_buffered_classification, initial_buffer_capacity, read_buffered,
-        require_completed_upload, selected_send_fault,
+        require_completed_upload, reserve_budget, selected_send_fault,
     };
 
     struct AlwaysReady;
@@ -514,6 +503,18 @@ mod tests {
     fn unknown_length_reserves_logical_budget_without_eager_physical_capacity() {
         assert_eq!(initial_buffer_capacity(None), 0);
         assert_eq!(initial_buffer_capacity(Some(64)), 64);
+    }
+
+    #[test]
+    fn buffered_byte_budget_rejects_aggregate_exhaustion() {
+        let budget = Arc::new(Semaphore::new(8));
+        let held = reserve_budget(&budget, 6).expect("reserve the first buffered request");
+        assert_eq!(
+            reserve_budget(&budget, 3).err(),
+            Some(HttpFault::RouterOverloaded)
+        );
+        drop(held);
+        assert!(reserve_budget(&budget, 8).is_ok());
     }
 
     #[test]

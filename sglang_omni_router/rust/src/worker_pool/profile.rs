@@ -133,6 +133,7 @@ pub(crate) struct RouteRequirement {
     trust_domain: TrustDomain,
 }
 
+/// One correlated worker requirement; matching must never combine profile rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ProfileRequirement {
     GenerationHttp {
@@ -146,6 +147,7 @@ pub(crate) enum ProfileRequirement {
     },
 }
 
+/// Preserves whether the caller selected a model or relied on a worker default.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ModelSelection {
     Explicit(String),
@@ -178,29 +180,6 @@ impl RouteRequirement {
 
     pub(super) fn trust_domain(&self) -> &TrustDomain {
         &self.trust_domain
-    }
-}
-
-impl ProfileRequirement {
-    pub(super) fn is_well_formed(&self) -> bool {
-        match self {
-            Self::GenerationHttp {
-                model,
-                message_content_forms,
-                media_placements,
-                input_modalities,
-                output_modalities,
-                audio_format,
-                ..
-            } => {
-                valid_model_id(model.model_id())
-                    && valid_requirement_set(message_content_forms, false)
-                    && valid_requirement_set(media_placements, true)
-                    && valid_requirement_set(input_modalities, false)
-                    && valid_requirement_set(output_modalities, false)
-                    && output_modalities.contains(&OutputModality::Audio) == audio_format.is_some()
-            }
-        }
     }
 }
 
@@ -470,10 +449,6 @@ fn validate_set<T: Eq + std::hash::Hash>(
         return Err(ConfigError::invalid(field, "must not contain duplicates"));
     }
     Ok(())
-}
-
-fn valid_requirement_set<T: Eq + std::hash::Hash>(values: &[T], allow_empty: bool) -> bool {
-    validate_set(values, "internal", allow_empty).is_ok()
 }
 
 fn set_eq<T: Eq>(left: &[T], right: &[T]) -> bool {

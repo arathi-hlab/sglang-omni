@@ -167,15 +167,14 @@ impl WorkerPool {
         admission: AdmissionLease,
         requirement: &RouteRequirement,
     ) -> Result<RequestLease, DispatchError> {
-        if !requirement.profile.is_well_formed() {
-            return Err(DispatchError::NoEligibleProfile);
+        let mut matching = [false; MAX_WORKERS];
+        for (index, record) in self.records.iter().enumerate() {
+            matching[index] = &record.trust_domain == requirement.trust_domain()
+                && record.has_profile(requirement);
         }
-        let profile_found = self
-            .records
-            .iter()
-            .any(|record| record.has_profile(requirement));
+        let profile_found = matching[..self.records.len()].contains(&true);
         self.dispatch_matching(admission, profile_found, |record| {
-            &record.trust_domain == requirement.trust_domain() && record.has_profile(requirement)
+            matching[record.registration_id.startup_ordinal()]
         })
     }
 
