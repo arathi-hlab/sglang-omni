@@ -407,12 +407,12 @@ fn invalid_connection_caps_fail_check_config_with_exit_two() {
 }
 
 #[test]
-fn impossible_nofile_limit_fails_before_serving() {
+fn outbound_socket_budget_is_checked_before_serving() {
     let _process_guard = process_lock();
     let directory = TestDir::new();
     let address = unused_address();
     let config = directory.config(address, 128, 1_000);
-    let mut child = ChildGuard::spawn_with_nofile(&config, 32);
+    let mut child = ChildGuard::spawn_with_nofile(&config, 192);
 
     assert_eq!(child.wait(PROCESS_DEADLINE).code(), Some(1));
     TcpStream::connect_timeout(&address, Duration::from_millis(100))

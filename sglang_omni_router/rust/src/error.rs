@@ -67,14 +67,14 @@ pub enum RouterError {
     #[cfg(unix)]
     #[error("failed to prepare the process RLIMIT_NOFILE soft limit: {0}")]
     FileLimit(#[source] io::Error),
-    /// The listener and configured accepted sockets cannot fit under RLIMIT_NOFILE.
+    /// The configured listener, client, and worker sockets cannot fit under RLIMIT_NOFILE.
     #[cfg(unix)]
     #[error(
-        "server.max_connections ({max_connections}) plus the listener exceeds the RLIMIT_NOFILE soft limit ({soft_limit}); raise the soft limit or lower server.max_connections"
+        "the configured router socket budget requires at least {required} file descriptors, exceeding the RLIMIT_NOFILE soft limit ({soft_limit}); raise the limit or lower the configured connection budgets"
     )]
     InsufficientFileLimit {
-        /// Configured accepted-socket ceiling.
-        max_connections: usize,
+        /// Minimum descriptors required by the configured socket graph.
+        required: u64,
         /// Process soft file-descriptor limit.
         soft_limit: u64,
     },

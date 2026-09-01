@@ -54,14 +54,38 @@ pub fn execute(config_path: &Path, check_config: bool) -> Result<RunOutcome, Rou
 #[cfg(unix)]
 fn prepare_file_limit(config: &Config) -> Result<(), RouterError> {
     let soft_limit = rlimit::increase_nofile_limit(u64::MAX).map_err(RouterError::FileLimit)?;
-    let minimum = config.server.max_connections as u64 + 1;
+    let minimum = minimum_file_limit(config)?;
     if soft_limit < minimum {
         return Err(RouterError::InsufficientFileLimit {
-            max_connections: config.server.max_connections,
+            required: minimum,
             soft_limit,
         });
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn minimum_file_limit(config: &Config) -> Result<u64, RouterError> {
+    // Listener + accepted clients + active upstreams + each worker's idle generation pool and
+    // serial health connection.
+    let accepted = u64::try_from(config.server.max_connections)
+        .map_err(|_| RouterError::WorkerPoolInvariant)?;
+    let workers =
+        u64::try_from(config.workers.len()).map_err(|_| RouterError::WorkerPoolInvariant)?;
+    let idle_per_worker = u64::try_from(config.http_generation.pool_max_idle_per_host)
+        .map_err(|_| RouterError::WorkerPoolInvariant)?;
+    let worker_sockets = workers
+        .checked_mul(
+            idle_per_worker
+                .checked_add(1)
+                .ok_or(RouterError::WorkerPoolInvariant)?,
+        )
+        .ok_or(RouterError::WorkerPoolInvariant)?;
+    1_u64
+        .checked_add(accepted)
+        .and_then(|minimum| minimum.checked_add(u64::from(config.admission.global)))
+        .and_then(|minimum| minimum.checked_add(worker_sockets))
+        .ok_or(RouterError::WorkerPoolInvariant)
 }
 
 #[cfg(not(unix))]
