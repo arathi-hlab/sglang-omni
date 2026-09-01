@@ -21,7 +21,7 @@ use profile::{
     MAX_WORKERS, RegistrationId, ServiceProfile, WorkerCapacityConfig, WorkerId,
     generation_cohort_is_homogeneous,
 };
-use resolver::{StaticResolver, build_generation_client, build_health_client};
+use resolver::{build_generation_client, build_health_client};
 use selection::Selector;
 
 struct CapacitySlot {
@@ -83,18 +83,9 @@ impl WorkerPool {
             .map(ResolvedTarget::from_worker)
             .collect::<Option<_>>()
             .ok_or(crate::error::RouterError::WorkerPoolInvariant)?;
-        let resolver = Arc::new(
-            StaticResolver::from_targets(&targets)
-                .ok_or(crate::error::RouterError::WorkerPoolInvariant)?,
-        );
-        let health_client = build_health_client(
-            Arc::clone(&resolver),
-            config.health.timeout(),
-            config.health.interval(),
-        )
-        .map_err(crate::error::RouterError::HealthClient)?;
+        let health_client = build_health_client(config.health.timeout(), config.health.interval())
+            .map_err(crate::error::RouterError::HealthClient)?;
         let generation_client = build_generation_client(
-            resolver,
             config.http_generation.connect_timeout(),
             config.http_generation.pool_idle_timeout(),
             config.http_generation.pool_max_idle_per_host,
@@ -397,7 +388,6 @@ mod tests {
             target: ResolvedTarget::from_parts(
                 &format!("http://127.0.0.1:{}/", 10_000 + ordinal),
                 "/health",
-                None,
             )
             .expect("test target"),
             trust_domain: TrustDomain::new(trust.to_owned()),
@@ -421,10 +411,7 @@ mod tests {
         admission: usize,
     ) -> WorkerPool {
         let gate = Arc::new(RwLock::new(AdmissionGate::open()));
-        let targets: Vec<_> = records.iter().map(|record| record.target.clone()).collect();
-        let resolver = Arc::new(StaticResolver::from_targets(&targets).expect("test resolver"));
         let client = build_health_client(
-            resolver,
             std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(1),
         )

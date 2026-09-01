@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::net::IpAddr;
 
 use serde::Deserialize;
 
@@ -53,7 +52,6 @@ impl TrustDomain {
 pub(crate) struct WorkerConfig {
     pub(crate) worker_id: String,
     pub(crate) base_url: String,
-    pub(crate) resolved_ip: Option<IpAddr>,
     pub(crate) trust_domain: String,
     pub(crate) default_model_id: String,
     #[serde(default = "default_health_path")]
@@ -231,7 +229,6 @@ pub(crate) fn validate_workers(workers: &[WorkerConfig]) -> Result<(), ConfigErr
     }
     let mut ids = HashSet::with_capacity(workers.len());
     let mut targets = HashSet::with_capacity(workers.len());
-    let mut resolved_targets = Vec::with_capacity(workers.len());
     for worker in workers {
         validate_identifier(&worker.worker_id, "workers.worker_id")?;
         if !ids.insert(worker.worker_id.as_str()) {
@@ -264,17 +261,15 @@ pub(crate) fn validate_workers(workers: &[WorkerConfig]) -> Result<(), ConfigErr
         let target = super::resolver::ResolvedTarget::from_worker(worker).ok_or_else(|| {
             ConfigError::invalid(
                 "workers.base_url",
-                "must be a canonical statically resolved HTTP or HTTPS target",
+                "must be a canonical HTTP or HTTPS origin",
             )
         })?;
-        let target_key = (target.base_url().as_str().to_owned(), target.socket_addr());
-        if !targets.insert(target_key) {
+        if !targets.insert(target.base_url().as_str().to_owned()) {
             return Err(ConfigError::invalid(
                 "workers.base_url",
-                "resolved targets must be unique",
+                "worker origins must be unique",
             ));
         }
-        resolved_targets.push(target);
         if worker.capacity.generation_http == 0 || worker.capacity.generation_http > 65_535 {
             return Err(ConfigError::invalid(
                 "workers.capacity.generation_http",
@@ -313,12 +308,6 @@ pub(crate) fn validate_workers(workers: &[WorkerConfig]) -> Result<(), ConfigErr
                 "must belong to a generation profile row",
             ));
         }
-    }
-    if super::resolver::StaticResolver::from_targets(&resolved_targets).is_none() {
-        return Err(ConfigError::invalid(
-            "workers.resolved_ip",
-            "hostname pins must be consistent across workers",
-        ));
     }
     Ok(())
 }
@@ -425,7 +414,6 @@ mod tests {
         WorkerConfig {
             worker_id: String::from("worker-a"),
             base_url: String::from("http://127.0.0.1:8000/"),
-            resolved_ip: None,
             trust_domain: String::from("local"),
             default_model_id: String::from("omni"),
             health_path: String::from("/health"),

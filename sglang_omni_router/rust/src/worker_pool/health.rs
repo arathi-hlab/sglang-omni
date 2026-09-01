@@ -218,11 +218,11 @@ mod tests {
         InputModality, MessageContentForm, OutputModality, RegistrationId, ServiceProfile,
         StreamMode, TrustDomain, WorkerId,
     };
-    use crate::worker_pool::resolver::{ResolvedTarget, StaticResolver, build_health_client};
+    use crate::worker_pool::resolver::{ResolvedTarget, build_health_client};
     use crate::worker_pool::{CapacitySlot, WorkerRecord};
 
     fn test_target(address: SocketAddr) -> ResolvedTarget {
-        ResolvedTarget::from_parts(&format!("http://{address}/"), "/health", None)
+        ResolvedTarget::from_parts(&format!("http://{address}/"), "/health")
             .expect("test target must build")
     }
 
@@ -251,10 +251,8 @@ mod tests {
         })
     }
 
-    fn test_client(records: &[Arc<WorkerRecord>], timeout: Duration) -> reqwest::Client {
-        let targets: Vec<_> = records.iter().map(|record| record.target.clone()).collect();
-        let resolver = StaticResolver::from_targets(&targets).expect("test resolver must build");
-        build_health_client(Arc::new(resolver), timeout, Duration::from_secs(60))
+    fn test_client(timeout: Duration) -> reqwest::Client {
+        build_health_client(timeout, Duration::from_secs(60))
             .expect("test health client must build")
     }
 
@@ -301,7 +299,7 @@ mod tests {
             thread::sleep(Duration::from_millis(300));
         });
         let record = test_record(0, address);
-        let client = test_client(std::slice::from_ref(&record), Duration::from_secs(1));
+        let client = test_client(Duration::from_secs(1));
         let mut supervisor = HealthSupervisor::start(
             &[Arc::clone(&record)],
             client,
@@ -341,7 +339,7 @@ mod tests {
             }
         });
         let record = test_record(0, address);
-        let client = test_client(std::slice::from_ref(&record), Duration::from_secs(1));
+        let client = test_client(Duration::from_secs(1));
         let mut supervisor = HealthSupervisor::start(
             &[Arc::clone(&record)],
             client,
@@ -381,7 +379,7 @@ mod tests {
             thread::sleep(Duration::from_millis(200));
         });
         let record = test_record(0, address);
-        let client = test_client(std::slice::from_ref(&record), Duration::from_millis(50));
+        let client = test_client(Duration::from_millis(50));
         let mut supervisor = HealthSupervisor::start(
             &[Arc::clone(&record)],
             client,
@@ -416,7 +414,7 @@ mod tests {
                 .expect("write non-2xx response");
         });
         let record = test_record(0, address);
-        let client = test_client(std::slice::from_ref(&record), Duration::from_secs(1));
+        let client = test_client(Duration::from_secs(1));
         let mut supervisor = HealthSupervisor::start(
             &[Arc::clone(&record)],
             client,
@@ -467,7 +465,7 @@ mod tests {
             drop(stalled);
         });
         let record = test_record(0, address);
-        let client = test_client(std::slice::from_ref(&record), Duration::from_secs(5));
+        let client = test_client(Duration::from_secs(5));
         let mut supervisor = HealthSupervisor::start(
             &[Arc::clone(&record)],
             client,
@@ -564,7 +562,7 @@ mod tests {
             assert_eq!(server_count.load(Ordering::Acquire), 2);
         });
         let record = test_record(0, address);
-        let client = test_client(std::slice::from_ref(&record), Duration::from_secs(1));
+        let client = test_client(Duration::from_secs(1));
         let mut supervisor = HealthSupervisor::start(
             &[Arc::clone(&record)],
             client,
@@ -651,7 +649,7 @@ mod tests {
             test_record(0, stalled_address),
             test_record(1, healthy_address),
         ];
-        let client = test_client(&records, Duration::from_secs(5));
+        let client = test_client(Duration::from_secs(5));
         let mut supervisor =
             HealthSupervisor::start(&records, client, Duration::from_secs(60), 1, 1);
         tokio::time::timeout(Duration::from_secs(1), async {

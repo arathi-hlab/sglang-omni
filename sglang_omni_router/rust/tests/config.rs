@@ -315,7 +315,7 @@ fn worker_fields_are_validated_before_route_cross_checks() {
 }
 
 #[test]
-fn worker_origins_and_static_pins_are_strict() {
+fn worker_origins_are_strict_and_dns_is_deferred() {
     let base = valid_config("127.0.0.1:30000", 30_000, "info");
     let invalid = [
         base.replace(
@@ -336,14 +336,6 @@ fn worker_origins_and_static_pins_are_strict() {
         ),
         base.replace(
             "base_url = \"http://127.0.0.1:8000/\"",
-            "base_url = \"http://worker.invalid:8000/\"",
-        ),
-        base.replace(
-            "base_url = \"http://127.0.0.1:8000/\"",
-            "base_url = \"http://127.0.0.1:8000/\"\nresolved_ip = \"127.0.0.2\"",
-        ),
-        base.replace(
-            "base_url = \"http://127.0.0.1:8000/\"",
             "base_url = \"http://127.0.0.1:0/\"",
         ),
     ];
@@ -352,48 +344,47 @@ fn worker_origins_and_static_pins_are_strict() {
         let message = error.to_string();
         assert!(message.contains("workers.base_url"));
         assert!(!message.contains("secret"));
-        assert!(!message.contains("worker.invalid"));
     }
 
     let hostname = base.replace(
         "base_url = \"http://127.0.0.1:8000/\"",
-        "base_url = \"http://worker.invalid:8000/\"\nresolved_ip = \"127.0.0.1\"",
+        "base_url = \"http://worker.invalid:8000/\"",
     );
     assert!(load_bytes(hostname.as_bytes()).is_ok());
 
-    let matching_literal_pin = base.replace(
+    let stale_pin = base.replace(
         "base_url = \"http://127.0.0.1:8000/\"",
         "base_url = \"http://127.0.0.1:8000/\"\nresolved_ip = \"127.0.0.1\"",
     );
-    assert!(load_bytes(matching_literal_pin.as_bytes()).is_ok());
+    let error = load_bytes(stale_pin.as_bytes()).expect_err("removed pin field must fail config");
+    assert!(error.to_string().contains("resolved_ip"));
 }
 
-fn additional_hostname_worker(worker_id: &str, port: u16, resolved_ip: &str) -> String {
+fn additional_worker(worker_id: &str, base_url: &str) -> String {
     format!(
-        "\n[[workers]]\nworker_id = \"{worker_id}\"\nbase_url = \"http://worker.invalid:{port}/\"\nresolved_ip = \"{resolved_ip}\"\ntrust_domain = \"local\"\ndefault_model_id = \"omni\"\nhealth_path = \"/health\"\n\n[workers.capacity]\ngeneration_http = 8\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"omni\"]\nmessage_content_forms = [\"string\"]\nmedia_placements = []\ninput_modalities = [\"text\"]\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\"]\n"
+        "\n[[workers]]\nworker_id = \"{worker_id}\"\nbase_url = \"{base_url}\"\ntrust_domain = \"local\"\ndefault_model_id = \"omni\"\nhealth_path = \"/health\"\n\n[workers.capacity]\ngeneration_http = 8\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"omni\"]\nmessage_content_forms = [\"string\"]\nmedia_placements = []\ninput_modalities = [\"text\"]\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\"]\n"
     )
 }
 
 #[test]
-fn hostname_resolver_coherence_is_a_safe_config_boundary() {
+fn normalized_worker_origins_are_unique() {
     let first = valid_config("127.0.0.1:30000", 30_000, "info").replace(
         "base_url = \"http://127.0.0.1:8000/\"",
-        "base_url = \"http://worker.invalid:8000/\"\nresolved_ip = \"127.0.0.1\"",
+        "base_url = \"http://worker.invalid:8000/\"",
     );
 
-    let coherent = format!(
+    let distinct = format!(
         "{first}{}",
-        additional_hostname_worker("worker-b", 8001, "127.0.0.1")
+        additional_worker("worker-b", "http://worker.invalid:8001/")
     );
-    assert!(load_bytes(coherent.as_bytes()).is_ok());
+    assert!(load_bytes(distinct.as_bytes()).is_ok());
 
-    let conflicting = format!(
+    let duplicate = format!(
         "{first}{}",
-        additional_hostname_worker("worker-b", 8001, "127.0.0.2")
+        additional_worker("worker-b", "HTTP://WORKER.INVALID:8000/")
     );
-    let error = load_bytes(conflicting.as_bytes()).expect_err("conflicting pins must fail config");
+    let error = load_bytes(duplicate.as_bytes()).expect_err("duplicate origin must fail config");
     let message = error.to_string();
-    assert!(message.contains("workers.resolved_ip"));
+    assert!(message.contains("workers.base_url"));
     assert!(!message.contains("worker.invalid"));
-    assert!(!message.contains("127.0.0"));
 }

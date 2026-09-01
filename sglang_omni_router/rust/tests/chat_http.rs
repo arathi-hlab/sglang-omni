@@ -406,17 +406,14 @@ impl RouterProcess {
         let config = directory.join("router.toml");
         let mut worker_config = String::new();
         for (worker_id, worker, hostname, profile) in workers {
-            let (base_url, resolved_ip) = if *hostname {
-                (
-                    format!("http://worker.invalid:{}/", worker.port()),
-                    String::from("resolved_ip = \"127.0.0.1\"\n"),
-                )
+            let base_url = if *hostname {
+                format!("http://localhost:{}/", worker.port())
             } else {
-                (format!("http://{worker}/"), String::new())
+                format!("http://{worker}/")
             };
             let profile_fields = profile.manifest_fields();
             worker_config.push_str(&format!(
-                "\n[[workers]]\nworker_id = \"{worker_id}\"\nbase_url = \"{base_url}\"\n{resolved_ip}trust_domain = \"local\"\ndefault_model_id = \"omni\"\nhealth_path = \"/health\"\n\n[workers.capacity]\ngeneration_http = {worker_capacity}\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"omni\"]\n{profile_fields}\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\"]\n"
+                "\n[[workers]]\nworker_id = \"{worker_id}\"\nbase_url = \"{base_url}\"\ntrust_domain = \"local\"\ndefault_model_id = \"omni\"\nhealth_path = \"/health\"\n\n[workers.capacity]\ngeneration_http = {worker_capacity}\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"omni\"]\n{profile_fields}\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\"]\n"
             ));
         }
         fs::write(

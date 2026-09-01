@@ -146,9 +146,9 @@ health path, exact capacity table, and one or more correlated service profiles.
 A profile row describes a combination the worker supports; the router never
 combines independent fields from different rows.
 
-DNS worker authorities must declare `resolved_ip`. The router connects to the
-pinned address while preserving the configured authority for HTTP `Host` and
-TLS SNI. Worker membership remains static for the process lifetime.
+DNS worker authorities are resolved when an upstream connection is opened, so
+health probes and new data connections follow DNS changes. Worker membership
+remains static for the process lifetime.
 
 Configuration limits are deployment budgets. Set admission, worker capacity,
 classification concurrency, connection-pool limits, and timeouts from the
