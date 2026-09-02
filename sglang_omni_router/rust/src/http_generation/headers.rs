@@ -6,6 +6,7 @@ use axum::http::header::{
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 
 use crate::error::HttpFault;
+use crate::request_id::REQUEST_ID_HEADER;
 
 pub(crate) struct RequestFraming {
     pub(crate) content_length: u64,
@@ -57,23 +58,8 @@ pub(crate) fn sanitize_response(
     if !(status.is_success() || status.is_client_error() || status.is_server_error()) {
         return Err(HttpFault::UpstreamProtocolError);
     }
-    if source.contains_key(CONTENT_ENCODING)
-        && connection_tokens.contains(CONTENT_ENCODING.as_str())
-    {
-        return Err(HttpFault::UpstreamProtocolError);
-    }
     let mut content_types = source.get_all(CONTENT_TYPE).iter();
     let content_type = content_types.next();
-    let content_length = if chunked {
-        None
-    } else {
-        let mut values = source.get_all(CONTENT_LENGTH).iter();
-        let first = values.next();
-        if values.next().is_some() {
-            return Err(HttpFault::UpstreamProtocolError);
-        }
-        first
-    };
     if content_types.next().is_some() {
         return Err(HttpFault::UpstreamProtocolError);
     }
@@ -82,49 +68,40 @@ pub(crate) fn sanitize_response(
     {
         return Err(HttpFault::UpstreamProtocolError);
     }
+    let mut content_lengths = source.get_all(CONTENT_LENGTH).iter();
+    let content_length = content_lengths.next();
+    if content_lengths.next().is_some() {
+        return Err(HttpFault::UpstreamProtocolError);
+    }
     if let Some(value) = content_length
         && parse_content_length(value).is_none()
     {
         return Err(HttpFault::UpstreamProtocolError);
     }
-    if status.is_success() {
-        let value = content_type
-            .filter(|_| !connection_tokens.contains(CONTENT_TYPE.as_str()))
-            .and_then(|value| value.to_str().ok())
-            .ok_or(HttpFault::UpstreamProtocolError)?;
-        let json = is_media_type(value, "application/json");
-        let sse = is_media_type(value, "text/event-stream");
-        if !json && !sse {
-            return Err(HttpFault::UpstreamProtocolError);
-        }
-    }
 
     let mut result = HeaderMap::new();
-    if !connection_tokens.contains(CONTENT_TYPE.as_str())
-        && let Some(value) = content_type
-    {
-        result.insert(CONTENT_TYPE, value.clone());
-    }
-    if !chunked
-        && !connection_tokens.contains(CONTENT_LENGTH.as_str())
-        && let Some(value) = content_length
-    {
-        result.insert(CONTENT_LENGTH, value.clone());
-    }
-    for name in [
-        CONTENT_ENCODING,
-        axum::http::header::CACHE_CONTROL,
-        axum::http::header::EXPIRES,
-        axum::http::header::VARY,
-    ] {
-        if connection_tokens.contains(name.as_str()) {
+    for (name, value) in source {
+        if strip_response_header(name, &connection_tokens) || (chunked && name == CONTENT_LENGTH) {
             continue;
         }
-        for value in source.get_all(&name) {
-            result.append(name.clone(), value.clone());
-        }
+        result.append(name.clone(), value.clone());
     }
     Ok(result)
+}
+
+fn strip_response_header(name: &HeaderName, connection_tokens: &HashSet<String>) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    ) || name.as_str() == REQUEST_ID_HEADER
+        || connection_tokens.contains(name.as_str())
 }
 
 fn response_is_chunked(headers: &HeaderMap) -> Result<bool, HttpFault> {
@@ -164,11 +141,6 @@ fn parse_content_length(value: &HeaderValue) -> Option<u64> {
         return None;
     }
     text.parse().ok()
-}
-
-fn is_media_type(value: &str, expected: &str) -> bool {
-    parse_content_type(value, |_name, _parameter| {})
-        .is_some_and(|media| media.eq_ignore_ascii_case(expected))
 }
 
 fn is_request_media_type(value: &str, expected: &str) -> bool {
@@ -439,15 +411,26 @@ mod tests {
     }
 
     #[test]
-    fn response_allowlist_preserves_safe_duplicates_and_encoding() {
+    fn response_preserves_end_to_end_headers_and_strips_connection_state() {
         let mut source = HeaderMap::new();
         source.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         source.append(CACHE_CONTROL, HeaderValue::from_static("private"));
         source.append(CACHE_CONTROL, HeaderValue::from_static("max-age=0"));
         source.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
         source.insert("set-cookie", HeaderValue::from_static("private=1"));
+        source.insert("retry-after", HeaderValue::from_static("1"));
+        source.insert("x-request-id", HeaderValue::from_static("worker-id"));
         source.insert("connection", HeaderValue::from_static("x-private"));
         source.insert("x-private", HeaderValue::from_static("secret"));
+        source.insert("keep-alive", HeaderValue::from_static("timeout=5"));
+        source.insert("proxy-authenticate", HeaderValue::from_static("Basic"));
+        source.insert(
+            "proxy-authorization",
+            HeaderValue::from_static("Basic token"),
+        );
+        source.insert("te", HeaderValue::from_static("trailers"));
+        source.insert("trailer", HeaderValue::from_static("x-checksum"));
+        source.insert("upgrade", HeaderValue::from_static("websocket"));
 
         let sanitized = sanitize_response(StatusCode::OK, &source).expect("valid worker response");
         assert_eq!(sanitized.get_all(CACHE_CONTROL).iter().count(), 2);
@@ -455,20 +438,42 @@ mod tests {
             sanitized.get(CONTENT_ENCODING),
             source.get(CONTENT_ENCODING)
         );
-        assert!(!sanitized.contains_key("set-cookie"));
+        assert_eq!(sanitized.get("set-cookie"), source.get("set-cookie"));
+        assert_eq!(sanitized.get("retry-after"), source.get("retry-after"));
+        assert!(!sanitized.contains_key("x-request-id"));
         assert!(!sanitized.contains_key("x-private"));
+        assert!(!sanitized.contains_key("connection"));
+        for name in [
+            "keep-alive",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "te",
+            "trailer",
+            "upgrade",
+        ] {
+            assert!(!sanitized.contains_key(name));
+        }
     }
 
     #[test]
-    fn response_rejects_redirects_and_invalid_success_media() {
+    fn response_accepts_valid_success_media_and_rejects_invalid_metadata() {
         let mut plain = HeaderMap::new();
         plain.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
         assert_eq!(
-            sanitize_response(StatusCode::OK, &plain).err(),
-            Some(HttpFault::UpstreamProtocolError)
+            sanitize_response(StatusCode::OK, &plain)
+                .expect("valid worker media type")
+                .get(CONTENT_TYPE),
+            plain.get(CONTENT_TYPE)
         );
         assert_eq!(
             sanitize_response(StatusCode::TEMPORARY_REDIRECT, &HeaderMap::new()).err(),
+            Some(HttpFault::UpstreamProtocolError)
+        );
+
+        let mut invalid_type = HeaderMap::new();
+        invalid_type.insert(CONTENT_TYPE, HeaderValue::from_static("invalid"));
+        assert_eq!(
+            sanitize_response(StatusCode::OK, &invalid_type).err(),
             Some(HttpFault::UpstreamProtocolError)
         );
 

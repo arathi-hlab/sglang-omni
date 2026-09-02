@@ -293,7 +293,7 @@ fn serve_connection(
             ),
             _ => write_response(
                 &mut stream,
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 8\r\nCache-Control: private\r\nCache-Control: max-age=0\r\nSet-Cookie: hidden=1\r\nConnection: keep-alive\r\n\r\n{\"ok\":1}",
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 8\r\nCache-Control: private\r\nCache-Control: max-age=0\r\nSet-Cookie: worker=1\r\nRetry-After: 1\r\nX-Request-ID: worker-id\r\nConnection: keep-alive\r\n\r\n{\"ok\":1}",
             ),
         }
     }
@@ -780,7 +780,10 @@ fn relay_holds_admission_and_is_not_cut_off_after_commitment() {
     assert_eq!(status(&first), 200);
     let head = response_head(&first).to_ascii_lowercase();
     assert_eq!(head.matches("cache-control:").count(), 2);
-    assert!(!head.contains("set-cookie:"));
+    assert!(head.contains("set-cookie: worker=1"));
+    assert!(head.contains("retry-after: 1"));
+    assert!(!head.contains("x-request-id: worker-id"));
+    assert_eq!(head.matches("x-request-id:").count(), 1);
 }
 
 #[test]
