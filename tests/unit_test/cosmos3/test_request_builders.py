@@ -354,7 +354,9 @@ def test_apply_text_result_preserves_optional_metadata() -> None:
     result: Any = SimpleNamespace(
         output_ids=[4],
         finish_reason="stop",
-        matched_stop="###",
+        req=SimpleNamespace(
+            finished_reason=SimpleNamespace(to_json=lambda: {"matched": "###"})
+        ),
         output_token_logprobs=[-0.5],
         weight_version="v1",
     )

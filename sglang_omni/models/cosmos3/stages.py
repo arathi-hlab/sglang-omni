@@ -21,13 +21,13 @@ def create_preprocessing_executor(
     model_path: str,
     *,
     revision: str | None = None,
-    thinker_max_seq_len: int | None = None,
+    max_seq_len: int | None = None,
 ) -> SimpleScheduler:
     """Create the CPU-only text preprocessing stage."""
 
     preprocessor = Cosmos3TextPreprocessor(
         model_path=model_path,
-        max_seq_len=thinker_max_seq_len,
+        max_seq_len=max_seq_len,
         revision=revision,
     )
     return SimpleScheduler(preprocessor)
@@ -41,7 +41,7 @@ def create_sglang_text_executor_from_config(
     tp_size: int = 1,
     nccl_port: int | None = None,
     revision: str | None = None,
-    thinker_max_seq_len: int = 8192,
+    max_seq_len: int = 8192,
     server_args_overrides: dict[str, Any] | None = None,
     total_gpu_memory_fraction: float | None = None,
     enable_async_decode: bool = False,
@@ -70,7 +70,7 @@ def create_sglang_text_executor_from_config(
     overrides["tp_size"] = tp_size
     server_args = build_sglang_server_args(
         model_path,
-        context_length=thinker_max_seq_len,
+        context_length=max_seq_len,
         **overrides,
     )
     validate_generation_batch_policy(

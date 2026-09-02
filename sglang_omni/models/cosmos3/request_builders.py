@@ -192,7 +192,12 @@ def apply_text_result(
     finish_reason = result.finish_reason
     if finish_reason is not None:
         text_out["finish_reason"] = finish_reason
-    matched_stop = result.matched_stop
+    finished_reason = getattr(result.req, "finished_reason", None)
+    matched_stop = (
+        finished_reason.to_json().get("matched")
+        if finished_reason is not None
+        else None
+    )
     if matched_stop is not None:
         text_out["matched_stop"] = matched_stop
     output_token_logprobs = result.output_token_logprobs

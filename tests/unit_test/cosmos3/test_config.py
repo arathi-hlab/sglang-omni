@@ -16,6 +16,9 @@ def test_text_pipeline_has_preprocess_ar_decode_topology() -> None:
     ]
     assert config.stages[0].next == "thinker"
     assert config.stages[1].tp_size == 1
+    assert config.stages[0].factory.max_seq_len == 8192
+    assert config.stages[1].factory.max_seq_len == 8192
+    assert config.stages[1].engine is not None
     assert config.stages[1].next == "decode"
     assert config.stages[1].stream_to == ["decode"]
     assert config.stages[2].terminal is True
@@ -37,5 +40,6 @@ def test_model_revision_is_shared_by_every_stage() -> None:
 
     assert config.revision == "cosmos-revision"
     assert all(
-        stage.factory_args["revision"] == "cosmos-revision" for stage in config.stages
+        config.stage_factory_kwargs(stage.name)["revision"] == "cosmos-revision"
+        for stage in config.stages
     )

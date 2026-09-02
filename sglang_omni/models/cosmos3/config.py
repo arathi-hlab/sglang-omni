@@ -7,7 +7,12 @@ from typing import Any, ClassVar
 
 from pydantic import Field
 
-from sglang_omni.config import PipelineConfig, StageConfig
+from sglang_omni.config import (
+    EngineStageConfig,
+    FactoryArgs,
+    PipelineConfig,
+    StageConfig,
+)
 
 _PKG = "sglang_omni.models.cosmos3"
 
@@ -21,20 +26,15 @@ def _text_stages() -> list[StageConfig]:
         StageConfig(
             name=PREPROCESSING_STAGE,
             process="pipeline",
-            factory=f"{_PKG}.stages.create_preprocessing_executor",
-            factory_args={"thinker_max_seq_len": 8192},
-            runtime_arg_map={"max_seq_len": "thinker_max_seq_len"},
+            factory_path=f"{_PKG}.stages.create_preprocessing_executor",
+            factory=FactoryArgs(max_seq_len=8192),
             next=THINKER_STAGE,
         ),
-        StageConfig(
+        EngineStageConfig(
             name=THINKER_STAGE,
             process="pipeline",
-            factory=f"{_PKG}.stages.create_sglang_text_executor_from_config",
-            factory_args={
-                "thinker_max_seq_len": 8192,
-                "enable_async_decode": False,
-            },
-            runtime_arg_map={"max_seq_len": "thinker_max_seq_len"},
+            factory_path=f"{_PKG}.stages.create_sglang_text_executor_from_config",
+            factory=FactoryArgs(max_seq_len=8192, enable_async_decode=False),
             gpu=0,
             tp_size=1,
             next=DECODE_STAGE,
@@ -43,7 +43,7 @@ def _text_stages() -> list[StageConfig]:
         StageConfig(
             name=DECODE_STAGE,
             process="pipeline",
-            factory=f"{_PKG}.stages.create_decode_executor",
+            factory_path=f"{_PKG}.stages.create_decode_executor",
             terminal=True,
             can_accept_stream_before_payload=True,
         ),
@@ -54,6 +54,9 @@ class Cosmos3TextPipelineConfig(PipelineConfig):
     """Three-stage MVP: preprocessing → text AR → detokenize."""
 
     architecture: ClassVar[str] = "Cosmos3ForConditionalGeneration"
+    stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        THINKER_STAGE: EngineStageConfig,
+    }
 
     @classmethod
     def mem_fraction_role_to_stage(cls) -> dict[str, str]:
@@ -63,12 +66,9 @@ class Cosmos3TextPipelineConfig(PipelineConfig):
     revision: str | None = None
     stages: list[StageConfig] = Field(default_factory=_text_stages)
 
-    def model_post_init(self, __context: Any = None, /) -> None:
-        super().model_post_init(__context)
-        if self.revision is None:
-            return
-        for stage in self.stages:
-            stage.factory_args["revision"] = self.revision
+    def stage_factory_kwargs(self, stage_name: str) -> dict[str, Any]:
+        del stage_name
+        return {"revision": self.revision} if self.revision is not None else {}
 
 
 EntryClass = Cosmos3TextPipelineConfig

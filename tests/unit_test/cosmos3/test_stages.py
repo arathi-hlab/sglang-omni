@@ -25,7 +25,7 @@ def test_preprocessing_factory_returns_simple_scheduler(monkeypatch) -> None:
     scheduler = stages.create_preprocessing_executor(
         "nvidia/Cosmos3-Nano",
         revision="cosmos-revision",
-        thinker_max_seq_len=8192,
+        max_seq_len=8192,
     )
 
     assert isinstance(scheduler, SimpleScheduler)
@@ -65,7 +65,7 @@ def test_text_factory_passes_through_tensor_parallelism(
 
     result = stages.create_sglang_text_executor_from_config(
         "nvidia/Cosmos3-Nano",
-        thinker_max_seq_len=4096,
+        max_seq_len=4096,
         gpu_id=2,
         tp_rank=1,
         tp_size=2,
