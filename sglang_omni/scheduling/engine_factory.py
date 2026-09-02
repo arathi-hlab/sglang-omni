@@ -12,6 +12,7 @@ from typing import Any, ClassVar
 from sglang_omni.scheduling.generation_batch_policy import (
     CudaGraphBackend,
     build_generation_batch_overrides,
+    finalize_prefill_cuda_graph_buckets,
     get_prefill_cuda_graph_backend,
     nested_prefill_overrides,
     validate_generation_batch_policy,
@@ -29,6 +30,16 @@ def _operator_selected_prefill_graph_backend(
     if "cuda_graph_backend_prefill" in server_args_overrides:
         return True
     return "backend" in nested_prefill_overrides(server_args_overrides)
+
+
+def _operator_selected_prefill_graph_buckets(
+    server_args_overrides: Mapping[str, Any] | None,
+) -> bool:
+    if not server_args_overrides:
+        return False
+    if "cuda_graph_bs_prefill" in server_args_overrides:
+        return True
+    return "bs" in nested_prefill_overrides(server_args_overrides)
 
 
 def _normalize_context_length(value: Any, *, model_name: str) -> int:
@@ -120,6 +131,9 @@ class SGLangGenerationEngineBuilder(ABC):
         operator_selected_prefill_backend = _operator_selected_prefill_graph_backend(
             server_args_overrides
         )
+        operator_selected_prefill_buckets = _operator_selected_prefill_graph_buckets(
+            server_args_overrides
+        )
         overrides = build_generation_batch_overrides(
             server_args_overrides=server_args_overrides,
             **self.generation_defaults(dtype=dtype),
@@ -159,6 +173,10 @@ class SGLangGenerationEngineBuilder(ABC):
             checkpoint_dir,
             context_length=self.context_length,
             **overrides,
+        )
+        finalize_prefill_cuda_graph_buckets(
+            server_args,
+            operator_selected_buckets=operator_selected_prefill_buckets,
         )
         self.customize_server_args(server_args)
         self.validate_before_infrastructure(server_args)

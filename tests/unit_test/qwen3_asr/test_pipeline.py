@@ -24,7 +24,9 @@ from sglang_omni.models.qwen3_asr.config import Qwen3ASRPipelineConfig
 from sglang_omni.models.qwen3_asr.stages import create_sglang_qwen3_asr_executor
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 from sglang_omni.scheduling.generation_batch_policy import (
+    build_default_prefill_cuda_graph_bs,
     build_generation_batch_overrides,
+    finalize_prefill_cuda_graph_buckets,
     validate_generation_batch_policy,
 )
 
@@ -593,8 +595,14 @@ def test_prefill_ladder_never_exceeds_the_context_length(
     )
 
     builder.adjust_overrides(overrides)
+    assert "cuda_graph_bs_prefill" not in overrides
+    server_args = _fake_server_args_builder({})("dummy", context_length, **overrides)
+    finalize_prefill_cuda_graph_buckets(
+        server_args,
+        operator_selected_buckets=False,
+    )
 
-    assert max(overrides["cuda_graph_bs_prefill"]) == expected_cap
+    assert max(server_args.cuda_graph_config.prefill.bs) == expected_cap
 
 
 def test_qwen3_asr_prefill_ladder_is_accepted_by_the_shared_policy(caplog) -> None:
@@ -604,6 +612,10 @@ def test_qwen3_asr_prefill_ladder_is_accepted_by_the_shared_policy(caplog) -> No
     )
     builder.adjust_overrides(overrides)
     server_args = _fake_server_args_builder({})("dummy", 1636, **overrides)
+    finalize_prefill_cuda_graph_buckets(
+        server_args,
+        operator_selected_buckets=False,
+    )
 
     with caplog.at_level(logging.WARNING):
         validate_generation_batch_policy(
@@ -621,6 +633,43 @@ def test_qwen3_asr_build_initializes_and_attests_prefill_graphs(monkeypatch) -> 
     assert recorded.infra_kwargs[-1]["enable_prefill_input_embeds"] is True
     assert len(recorded.graph_init_calls) == 1
     assert len(recorded.attest_calls) == 1
+
+
+def test_qwen3_asr_auto_chunk_resolves_before_prefill_buckets(monkeypatch) -> None:
+    recorded = _patch_engine_dependencies(monkeypatch, want_cuda_graph=True)
+    build_resolved_server_args = _fake_server_args_builder(recorded.build_kwargs)
+
+    def _resolve_like_sub_35_gib_gpu(model_path, context_length, **overrides):
+        assert overrides["chunked_prefill_size"] is None
+        assert "cuda_graph_bs_prefill" not in overrides
+        server_args = build_resolved_server_args(
+            model_path,
+            context_length,
+            **overrides,
+        )
+        server_args.chunked_prefill_size = 2048
+        server_args.cuda_graph_config.prefill.max_bs = 2048
+        server_args.cuda_graph_config.prefill.bs = build_default_prefill_cuda_graph_bs(
+            2048
+        )
+        return server_args
+
+    monkeypatch.setattr(
+        sglang_backend,
+        "build_sglang_server_args",
+        _resolve_like_sub_35_gib_gpu,
+    )
+
+    scheduler = qwen3_asr_stages.create_sglang_qwen3_asr_executor(
+        "dummy",
+        server_args_overrides={"chunked_prefill_size": None},
+    )
+
+    _, attested = recorded.attest_calls[-1]
+    assert scheduler is not None
+    assert attested.chunked_prefill_size == 2048
+    assert max(attested.cuda_graph_config.prefill.bs) == 2048
+    assert 4096 not in attested.cuda_graph_config.prefill.bs
 
 
 @pytest.mark.parametrize(

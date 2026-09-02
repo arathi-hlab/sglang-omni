@@ -12,6 +12,7 @@ import pytest
 from sglang_omni.scheduling.generation_batch_policy import (
     build_default_prefill_cuda_graph_bs,
     build_generation_batch_overrides,
+    finalize_prefill_cuda_graph_buckets,
     validate_generation_batch_policy,
 )
 from sglang_omni.vendor.sglang.server_args import override_server_args
@@ -220,7 +221,7 @@ def test_nested_prefill_max_bs_composes_as_a_flat_cap() -> None:
     assert "cuda_graph_bs_prefill" not in overrides
 
 
-def test_breakable_prefill_cap_builds_the_shared_default_ladder() -> None:
+def test_breakable_prefill_cap_defers_the_shared_default_ladder() -> None:
     overrides = build_generation_batch_overrides(
         max_running_requests=4,
         server_args_overrides={
@@ -229,12 +230,11 @@ def test_breakable_prefill_cap_builds_the_shared_default_ladder() -> None:
         },
     )
 
-    assert overrides["cuda_graph_bs_prefill"] == (
-        build_default_prefill_cuda_graph_bs(512)
-    )
+    assert overrides["cuda_graph_max_bs_prefill"] == 512
+    assert "cuda_graph_bs_prefill" not in overrides
 
 
-def test_breakable_prefill_cap_is_clamped_to_reachable_tokens() -> None:
+def test_breakable_prefill_cap_clamp_is_deferred_until_server_args_resolve() -> None:
     overrides = build_generation_batch_overrides(
         max_running_requests=4,
         server_args_overrides={
@@ -244,21 +244,30 @@ def test_breakable_prefill_cap_is_clamped_to_reachable_tokens() -> None:
         },
     )
 
-    assert overrides["cuda_graph_max_bs_prefill"] == 768
-    assert overrides["cuda_graph_bs_prefill"] == (
-        build_default_prefill_cuda_graph_bs(768)
-    )
+    assert overrides["cuda_graph_max_bs_prefill"] == 2048
+    assert "cuda_graph_bs_prefill" not in overrides
 
 
-def test_nested_prefill_max_bs_trims_a_stage_default_ladder() -> None:
+def test_nested_prefill_max_bs_trims_a_stage_default_ladder_after_resolution() -> None:
     overrides = build_generation_batch_overrides(
         max_running_requests=4,
         cuda_graph_bs_prefill=build_default_prefill_cuda_graph_bs(512),
         server_args_overrides={"cuda_graph_config": {"prefill": {"max_bs": 128}}},
     )
+    server_args = _server_args(
+        prefill_backend="breakable",
+        prefill_bs=overrides["cuda_graph_bs_prefill"],
+        prefill_max_bs=overrides["cuda_graph_max_bs_prefill"],
+        locked={("prefill", "bs"), ("prefill", "max_bs")},
+    )
 
-    assert overrides["cuda_graph_max_bs_prefill"] == 128
-    assert max(overrides["cuda_graph_bs_prefill"]) == 128
+    finalize_prefill_cuda_graph_buckets(
+        server_args,
+        operator_selected_buckets=False,
+    )
+
+    assert server_args.cuda_graph_config.prefill.max_bs == 128
+    assert max(server_args.cuda_graph_config.prefill.bs) == 128
 
 
 def test_operator_prefill_buckets_are_never_trimmed_by_a_nested_cap() -> None:
