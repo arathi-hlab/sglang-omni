@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
 use crate::worker_pool::{ReferenceForm, SpeechResponseFormat, SpeechTask};
 
@@ -61,32 +61,24 @@ where
     A: MapAccess<'de>,
 {
     match key {
-        "model" => fields.model = Some(map.next_value()?),
-        "response_format" => fields.response_format = Some(map.next_value()?),
-        "task_type" => fields.task = Some(map.next_value()?),
+        "model" => fields.model = Some(map.next_value_seed(ScalarFactSeed)?.into_string()),
+        "response_format" => {
+            fields.response_format = Some(map.next_value_seed(ScalarFactSeed)?.into_string())
+        }
+        "task_type" => fields.task = Some(map.next_value_seed(ScalarFactSeed)?.into_string()),
         "voice" => {
-            fields.voice = Some(map.next_value()?);
+            fields.voice = Some(map.next_value_seed(ScalarFactSeed)?.into_string());
             fields.voice_present = true;
         }
         "speaker" => {
-            let value = map.next_value()?;
+            let value = map.next_value_seed(ScalarFactSeed)?.into_string();
             if !fields.voice_present {
                 fields.voice = Some(value);
             }
         }
-        "ref_audio" => {
-            let (present, valid) = map.next_value_seed(ScalarFactSeed)?.into_string_presence();
-            if !valid {
-                return Err(de::Error::custom("ref_audio must be null or a string"));
-            }
-            fields.ref_audio = Some(present);
-        }
+        "ref_audio" => fields.ref_audio = Some(map.next_value_seed(ScalarFactSeed)?.is_string()),
         "references" => {
-            let (value, valid) = map.next_value_seed(ReferencesFactSeed)?.into_parts();
-            if !valid {
-                return Err(de::Error::custom("references must be null or an array"));
-            }
-            fields.references = Some(value);
+            fields.references = Some(map.next_value_seed(ReferencesFactSeed)?.into_value())
         }
         _ => return Ok(false),
     }
@@ -144,6 +136,15 @@ where
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+/// Reads a Pydantic-compatible boolean routing fact without rejecting other worker-owned values.
+pub(crate) fn read_stream<'de, A>(map: &mut A, fields: &mut SpeechFields) -> Result<(), A::Error>
+where
+    A: MapAccess<'de>,
+{
+    fields.stream = Some(map.next_value_seed(ScalarFactSeed)?.into_bool());
+    Ok(())
 }
 
 pub(crate) fn response_format(value: &str) -> Option<SpeechResponseFormat> {
@@ -219,18 +220,31 @@ pub(crate) fn named_voice(fields: &SpeechFields, references: &[ReferenceForm]) -
             .is_some_and(|voice| !voice.is_empty() && !voice.eq_ignore_ascii_case("default"))
 }
 
-enum ScalarFact<'a> {
+pub(crate) enum ScalarFact<'a> {
     String(Cow<'a, str>),
+    Bool(bool),
+    Signed(i64),
+    Unsigned(u64),
+    Float(f64),
     Null,
     Other,
 }
 
 impl ScalarFact<'_> {
+    pub(crate) fn into_string(self) -> Option<String> {
+        match self {
+            Self::String(value) => Some(value.into_owned()),
+            _ => None,
+        }
+    }
+
     fn into_nullable_string(self) -> (Option<String>, bool) {
         match self {
             Self::String(value) => (Some(value.into_owned()), true),
             Self::Null => (None, true),
-            Self::Other => (None, false),
+            Self::Bool(_) | Self::Signed(_) | Self::Unsigned(_) | Self::Float(_) | Self::Other => {
+                (None, false)
+            }
         }
     }
 
@@ -238,12 +252,30 @@ impl ScalarFact<'_> {
         match self {
             Self::String(_) => (true, true),
             Self::Null => (false, true),
-            Self::Other => (false, false),
+            Self::Bool(_) | Self::Signed(_) | Self::Unsigned(_) | Self::Float(_) | Self::Other => {
+                (false, false)
+            }
         }
+    }
+
+    fn into_bool(self) -> Option<bool> {
+        match self {
+            Self::Bool(value) => Some(value),
+            Self::Signed(value) => bool_from_integer(value),
+            Self::Unsigned(value) => bool_from_integer(value),
+            Self::Float(0.0) => Some(false),
+            Self::Float(1.0) => Some(true),
+            Self::String(value) => parse_bool_fact(&value),
+            Self::Float(_) | Self::Null | Self::Other => None,
+        }
+    }
+
+    fn is_string(&self) -> bool {
+        matches!(self, Self::String(_))
     }
 }
 
-struct ScalarFactSeed;
+pub(crate) struct ScalarFactSeed;
 
 impl<'de> DeserializeSeed<'de> for ScalarFactSeed {
     type Value = ScalarFact<'de>;
@@ -280,20 +312,20 @@ impl<'de> DeserializeSeed<'de> for ScalarFactSeed {
                 Ok(ScalarFact::Null)
             }
 
-            fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
-                Ok(ScalarFact::Other)
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(ScalarFact::Bool(value))
             }
 
-            fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
-                Ok(ScalarFact::Other)
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(ScalarFact::Signed(value))
             }
 
-            fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
-                Ok(ScalarFact::Other)
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(ScalarFact::Unsigned(value))
             }
 
-            fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
-                Ok(ScalarFact::Other)
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(ScalarFact::Float(value))
             }
 
             fn visit_seq<A>(self, sequence: A) -> Result<Self::Value, A::Error>
@@ -316,12 +348,48 @@ impl<'de> DeserializeSeed<'de> for ScalarFactSeed {
     }
 }
 
+fn bool_from_integer<T>(value: T) -> Option<bool>
+where
+    T: Eq + From<u8>,
+{
+    if value == T::from(0) {
+        Some(false)
+    } else if value == T::from(1) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+fn parse_bool_fact(value: &str) -> Option<bool> {
+    if ["1", "on", "t", "true", "y", "yes"]
+        .iter()
+        .any(|candidate| value.eq_ignore_ascii_case(candidate))
+    {
+        Some(true)
+    } else if ["0", "off", "f", "false", "n", "no"]
+        .iter()
+        .any(|candidate| value.eq_ignore_ascii_case(candidate))
+    {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 enum ReferencesFact {
     Value(Option<ReferenceFlags>),
     Invalid,
 }
 
 impl ReferencesFact {
+    const fn into_value(self) -> Option<ReferenceFlags> {
+        match self {
+            Self::Value(value) => value,
+            Self::Invalid => None,
+        }
+    }
+
     const fn into_parts(self) -> (Option<ReferenceFlags>, bool) {
         match self {
             Self::Value(value) => (value, true),
