@@ -71,7 +71,6 @@ def test_prefill_policy_accepts_disabled_and_declared_breakable() -> None:
             prefill_backend="breakable",
             prefill_bs=(128, 256, 512),
             prefill_max_bs=512,
-            locked=_PREFILL_BS_LOCKED,
         )
     )
 
@@ -82,7 +81,6 @@ def test_breakable_requires_cuda_graphs_enabled() -> None:
             _server_args(
                 prefill_backend="breakable",
                 prefill_bs=(128,),
-                locked=_PREFILL_BS_LOCKED,
                 disable_cuda_graph=True,
             )
         )
@@ -95,20 +93,22 @@ def test_non_breakable_prefill_backend_is_rejected() -> None:
                 _server_args(
                     prefill_backend=backend,
                     prefill_bs=(128,),
-                    locked=_PREFILL_BS_LOCKED,
                 )
             )
 
 
-def test_breakable_requires_explicit_buckets() -> None:
-    with pytest.raises(ValueError, match="explicit"):
-        _validate(
-            _server_args(
-                prefill_backend="breakable",
-                prefill_bs=(4, 8, 16),
-                locked=frozenset(),
-            )
-        )
+def test_breakable_accepts_a_derived_ladder(caplog) -> None:
+    server_args = _server_args(
+        prefill_backend="breakable",
+        prefill_bs=build_default_prefill_cuda_graph_bs(8192),
+        prefill_max_bs=8192,
+        chunked_prefill_size=8192,
+    )
+
+    with caplog.at_level(logging.INFO):
+        _validate(server_args)
+
+    assert not caplog.records
 
 
 def test_breakable_rejects_non_increasing_buckets() -> None:
@@ -117,7 +117,6 @@ def test_breakable_rejects_non_increasing_buckets() -> None:
             _server_args(
                 prefill_backend="breakable",
                 prefill_bs=(256, 128),
-                locked=_PREFILL_BS_LOCKED,
             )
         )
 
@@ -131,58 +130,89 @@ def test_breakable_rejects_non_integral_bucket_types(
             _server_args(
                 prefill_backend="breakable",
                 prefill_bs=buckets,
-                locked=_PREFILL_BS_LOCKED,
             )
         )
 
 
-def test_breakable_rejects_max_bs_mismatch() -> None:
-    with pytest.raises(ValueError, match="cuda_graph_max_bs_prefill"):
+def test_prefill_max_bs_above_the_top_bucket_is_accepted(caplog) -> None:
+    with caplog.at_level(logging.WARNING):
         _validate(
             _server_args(
                 prefill_backend="breakable",
                 prefill_bs=(128, 256),
                 prefill_max_bs=512,
-                locked=_PREFILL_BS_LOCKED,
             )
         )
 
+    assert not caplog.records
 
-def test_breakable_rejects_buckets_above_chunked_prefill() -> None:
-    with pytest.raises(
-        ValueError,
-        match=(
-            "cuda_graph_bs_prefill max=12288 exceeds resolved "
-            "chunked_prefill_size=8192"
+
+@pytest.mark.parametrize(
+    ("server_args_kwargs", "budget"),
+    [
+        ({"prefill_bs": (128, 256), "prefill_max_bs": 128}, 128),
+        ({"prefill_bs": (4096, 12288), "chunked_prefill_size": 8192}, 8192),
+        (
+            {
+                "prefill_bs": (8192, 32768),
+                "prefill_max_bs": 32768,
+                "chunked_prefill_size": -1,
+                "max_prefill_tokens": 16384,
+            },
+            16384,
         ),
-    ):
+        (
+            {
+                "prefill_bs": (1024, 4096),
+                "prefill_max_bs": 4096,
+                "chunked_prefill_size": 0,
+                "max_prefill_tokens": 2048,
+            },
+            2048,
+        ),
+    ],
+)
+def test_buckets_above_the_token_budget_warn_and_stay(
+    server_args_kwargs: dict[str, Any], budget: int, caplog
+) -> None:
+    server_args = _server_args(prefill_backend="breakable", **server_args_kwargs)
+
+    with caplog.at_level(logging.WARNING):
+        _validate(server_args)
+
+    prefill = server_args.cuda_graph_config.prefill
+    assert prefill.bs == server_args_kwargs["prefill_bs"]
+    assert prefill.max_bs == server_args_kwargs.get("prefill_max_bs")
+    top = server_args_kwargs["prefill_bs"][-1]
+    assert f"max={top} exceeds the per-forward token budget {budget}" in caplog.text
+
+
+def test_top_bucket_equal_to_the_token_budget_is_silent(caplog) -> None:
+    with caplog.at_level(logging.WARNING):
         _validate(
             _server_args(
                 prefill_backend="breakable",
-                prefill_bs=(4096, 12288),
-                locked=_PREFILL_BS_LOCKED,
-                chunked_prefill_size=8192,
+                prefill_bs=(2048, 4096),
+                prefill_max_bs=8192,
+                chunked_prefill_size=4096,
             )
         )
 
+    assert not caplog.records
 
-def test_breakable_rejects_buckets_above_max_prefill_tokens() -> None:
-    with pytest.raises(
-        ValueError,
-        match=(
-            "cuda_graph_bs_prefill max=32768 exceeds resolved "
-            "max_prefill_tokens=16384"
-        ),
-    ):
+
+def test_empty_derived_ladder_passes_with_a_warning(caplog) -> None:
+    with caplog.at_level(logging.WARNING):
         _validate(
             _server_args(
                 prefill_backend="breakable",
-                prefill_bs=(4096, 32768),
-                locked=_PREFILL_BS_LOCKED,
+                prefill_bs=[],
+                prefill_max_bs=-1,
                 chunked_prefill_size=-1,
-                max_prefill_tokens=16384,
             )
         )
+
+    assert "require a token budget" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -202,7 +232,6 @@ def test_breakable_rejects_sglang_incompatible_features(
         prefill_backend="breakable",
         prefill_bs=(128, 256, 512),
         prefill_max_bs=512,
-        locked=_PREFILL_BS_LOCKED,
     )
     override_server_args(server_args, "test", **incompatibility)
 
@@ -318,15 +347,18 @@ def test_conflicting_flat_and_nested_prefill_overrides_are_rejected() -> None:
         )
 
 
-def test_breakable_accepts_disabled_chunked_prefill() -> None:
-    _validate(
-        _server_args(
-            prefill_backend="breakable",
-            prefill_bs=(4096, 8192),
-            locked=_PREFILL_BS_LOCKED,
-            chunked_prefill_size=-1,
+def test_breakable_accepts_disabled_chunked_prefill(caplog) -> None:
+    with caplog.at_level(logging.WARNING):
+        _validate(
+            _server_args(
+                prefill_backend="breakable",
+                prefill_bs=(4096, 8192),
+                prefill_max_bs=-1,
+                chunked_prefill_size=-1,
+            )
         )
-    )
+
+    assert not caplog.records
 
 
 def test_breakable_warns_on_padding_factor_gaps(caplog) -> None:
@@ -335,7 +367,6 @@ def test_breakable_warns_on_padding_factor_gaps(caplog) -> None:
             _server_args(
                 prefill_backend="breakable",
                 prefill_bs=(64, 512),
-                locked=_PREFILL_BS_LOCKED,
             )
         )
 
@@ -348,7 +379,6 @@ def test_padding_gap_warning_requires_a_non_empty_eager_range(caplog) -> None:
             _server_args(
                 prefill_backend="breakable",
                 prefill_bs=(64, 129),
-                locked=_PREFILL_BS_LOCKED,
             )
         )
     assert not any("padding factor" in record.message for record in caplog.records)
@@ -358,7 +388,6 @@ def test_padding_gap_warning_requires_a_non_empty_eager_range(caplog) -> None:
             _server_args(
                 prefill_backend="breakable",
                 prefill_bs=(64, 131),
-                locked=_PREFILL_BS_LOCKED,
             )
         )
     assert any("[(65, 65)]" in record.getMessage() for record in caplog.records)
@@ -382,7 +411,6 @@ def test_default_prefill_ladder_matches_sglang_generated_ladder() -> None:
             prefill_backend="breakable",
             prefill_bs=tuple(ladder),
             prefill_max_bs=512,
-            locked=_PREFILL_BS_LOCKED,
         )
     )
 
