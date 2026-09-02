@@ -432,7 +432,7 @@ def test_disable_overrides_win_over_default_prefill_backend() -> None:
     assert explicit_conflict["cuda_graph_backend_prefill"] == "breakable"
 
 
-def test_builder_wires_payload_slot_and_attestation(monkeypatch) -> None:
+def test_builder_wires_payload_slot_and_attestation(monkeypatch, caplog) -> None:
     from sglang_omni.scheduling import bootstrap, sglang_backend
     from sglang_omni.scheduling.engine_factory import TtsEngineBuilder
     from sglang_omni.utils import cuda_graph_batch_validator
@@ -521,23 +521,30 @@ def test_builder_wires_payload_slot_and_attestation(monkeypatch) -> None:
         def make_scheduler(self, **kwargs: Any) -> Any:
             return SimpleNamespace(outbox=None, kwargs=kwargs)
 
-    PolicyBuilder().build(
-        "model",
-        server_args_overrides={
-            "cuda_graph_backend_prefill": "breakable",
-            "cuda_graph_bs_prefill": [128, 256],
-        },
-    )
+    with caplog.at_level(logging.WARNING):
+        PolicyBuilder().build(
+            "model",
+            server_args_overrides={
+                "cuda_graph_backend_prefill": "breakable",
+                "cuda_graph_bs_prefill": [128, 256],
+            },
+        )
 
     assert infra_kwargs_seen[-1]["enable_prefill_input_embeds"] is True
     assert backend_locks_seen[-1] is True
     assert len(attest_calls) == 1
+    assert (
+        "Prefill CUDA graph buckets were explicitly configured while "
+        "chunked_prefill_size is auto-resolved" in caplog.text
+    )
 
+    caplog.clear()
     PolicyBuilder().build("model")
 
     assert "enable_prefill_input_embeds" not in infra_kwargs_seen[-1]
     assert backend_locks_seen[-1] is False
     assert len(attest_calls) == 1
+    assert "chunked_prefill_size is auto-resolved" not in caplog.text
 
 
 def test_builder_rejects_breakable_without_model_opt_in(monkeypatch) -> None:
