@@ -261,7 +261,7 @@ def test_nested_prefill_max_bs_composes_as_a_flat_cap() -> None:
     assert "cuda_graph_bs_prefill" not in overrides
 
 
-def test_breakable_prefill_cap_defers_the_shared_default_ladder() -> None:
+def test_breakable_prefill_cap_leaves_the_ladder_to_sglang() -> None:
     overrides = build_generation_batch_overrides(
         max_running_requests=4,
         server_args_overrides={
@@ -274,7 +274,7 @@ def test_breakable_prefill_cap_defers_the_shared_default_ladder() -> None:
     assert "cuda_graph_bs_prefill" not in overrides
 
 
-def test_breakable_prefill_cap_clamp_is_deferred_until_server_args_resolve() -> None:
+def test_breakable_prefill_cap_is_not_clamped_before_server_args() -> None:
     overrides = build_generation_batch_overrides(
         max_running_requests=4,
         server_args_overrides={
