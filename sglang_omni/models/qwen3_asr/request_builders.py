@@ -57,9 +57,8 @@ _AUDIO_START = "<|audio_start|>"
 _AUDIO_PAD = "<|audio_pad|>"
 _AUDIO_END = "<|audio_end|>"
 _ASR_TEXT = "<asr_text>"
-# Qwen3-ASR's checkpoint chat template emits this empty system turn even
-# when no caller-provided system context is present. Biasing text from the
-# caller goes inside it, which is where the checkpoint expects to read it.
+# Note(Audrey): the checkpoint's chat template emits this system turn even when
+# empty; caller biasing text goes inside it.
 _SYSTEM_PROMPT = "<|im_start|>system\n<|im_end|>\n"
 
 
@@ -194,8 +193,7 @@ def make_qwen3_asr_scheduler_adapters(
         forced_language = (
             None if requested_language is None else resolve_language(requested_language)
         )
-        # Biasing text from the caller. whisper_asr, moss_transcribe_diarize and
-        # ming_tts already consume the same parameter.
+        # Note(Audrey): the checkpoint reads biasing text from the system turn.
         raw_context = params.get("prompt")
         bias_context = str(raw_context).strip() if raw_context else None
         bias_context = bias_context or None

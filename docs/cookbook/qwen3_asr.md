@@ -119,7 +119,7 @@ conditions flush any buffered text before the final transcript event.
 | `file` | file | required | Audio file uploaded as multipart form data |
 | `model` | string | server default | Model identifier |
 | `language` | string | none | Optional language hint as a supported code or canonical name (case-insensitive); omit it for automatic detection |
-| `prompt` | string | none | Accepted for OpenAI compatibility; Qwen3-ASR currently ignores it |
+| `prompt` | string | none | Vocabulary biasing: terms likely to appear in the audio (e.g. names, jargon). Raises the model's preference for the supplied terms; it does not force them. A short, relevant list works best — accuracy peaks around 20 terms, and the text is prefilled with every request, so longer lists add latency |
 | `response_format` | string | `json` | `json`, `verbose_json`, or `text` |
 | `temperature` | float | `0` | Sampling temperature; `0` uses greedy decoding |
 | `max_new_tokens` | integer | server stage limit | Per-request generation-token limit |
@@ -279,5 +279,4 @@ sgl-omni serve --model-path Qwen/Qwen3-ASR-1.7B \
 - Non-streaming uploads up to `max_total_audio_s` (default one hour) are
   transcribed in full via chunking; see Long Audio above. Streaming requests
   are limited to `max_native_clip_s` (1,200s).
-- `prompt` is accepted by the HTTP endpoint for OpenAI compatibility, but Qwen3-ASR currently ignores it.
 - Audio is resampled to 16 kHz before transcription.
