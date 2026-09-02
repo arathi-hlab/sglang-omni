@@ -8,6 +8,7 @@ mod config;
 mod error;
 mod http_generation;
 mod http_media;
+mod http_relay;
 mod lifecycle;
 mod request_id;
 mod server;

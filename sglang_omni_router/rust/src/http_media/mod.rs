@@ -207,7 +207,6 @@ async fn handle(
             request.into_body(),
             framing.content_length,
             media.streamed_max,
-            deadline,
         );
         return Arc::clone(&media.relay)
             .send(outgoing, lease, request_id, deadline, |status, headers| {
