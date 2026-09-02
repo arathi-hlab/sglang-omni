@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from sglang.srt.model_executor.cuda_graph_config import CudaGraphConfig, PhaseConfig
+
 import sglang_omni.platforms as platforms
 from sglang_omni.scheduling.sglang_backend import server_args_builder
 
@@ -20,6 +22,10 @@ class _CapturedServerArgs:
         self.kwargs = kwargs
         self.enable_dp_attention = False
         self.startup_weight_load_mode = kwargs.get("startup_weight_load_mode", "serial")
+        self.cuda_graph_config = CudaGraphConfig(
+            prefill=PhaseConfig(backend=kwargs["cuda_graph_backend_prefill"])
+        )
+        self._cuda_graph_config_locked: set[tuple[str, str]] = set()
 
 
 def _build(monkeypatch, **extra: Any) -> dict[str, Any]:
