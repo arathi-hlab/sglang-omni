@@ -55,7 +55,6 @@ UNSUPPORTED: dict[str, dict[str, str]] = {
 # rather than rotting.
 KNOWN_GAPS: dict[tuple[str, str], str] = {
     ("qwen3_asr", "prompt"): "wired in #1807",
-    ("fun_asr", "prompt"): "wired in #1874",
 }
 
 _KEY_PATTERN = re.compile(r'params(?:\.get\(|\[)\s*"([a-z_]+)"')
