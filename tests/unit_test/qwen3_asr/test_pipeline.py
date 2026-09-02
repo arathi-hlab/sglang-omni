@@ -623,18 +623,11 @@ def test_qwen3_asr_build_initializes_and_attests_prefill_graphs(monkeypatch) -> 
     assert len(recorded.attest_calls) == 1
 
 
-@pytest.mark.parametrize(
-    ("resolved_chunked_prefill_size", "exceeds_max_prefill_tokens"),
-    [
-        (2048, False),
-        (8192, True),
-    ],
-)
+@pytest.mark.parametrize("resolved_chunked_prefill_size", [2048, 8192])
 def test_qwen3_asr_auto_chunked_prefill_uses_the_sglang_ladder(
     monkeypatch,
     caplog,
     resolved_chunked_prefill_size: int,
-    exceeds_max_prefill_tokens: bool,
 ) -> None:
     recorded = _patch_engine_dependencies(monkeypatch, want_cuda_graph=True)
     monkeypatch.setattr(
@@ -667,9 +660,7 @@ def test_qwen3_asr_auto_chunked_prefill_uses_the_sglang_ladder(
         f"{resolved_chunked_prefill_size}, prefill CUDA graph cap "
         f"{resolved_chunked_prefill_size}"
     ) in caplog.text
-    assert (
-        "exceeds the per-forward token budget 4096" in caplog.text
-    ) is exceeds_max_prefill_tokens
+    assert "cannot be scheduled" not in caplog.text
 
 
 def test_qwen3_asr_disabled_chunked_prefill_derives_no_buckets(
@@ -685,10 +676,10 @@ def test_qwen3_asr_disabled_chunked_prefill_derives_no_buckets(
     _, attested = recorded.attest_calls[-1]
     assert list(attested.cuda_graph_config.prefill.bs) == []
     assert len(recorded.graph_init_calls) == 1
-    assert "require a token budget" in caplog.text
+    assert "require a positive prefill graph cap" in caplog.text
 
 
-def test_qwen3_asr_operator_buckets_above_the_budget_start_with_a_warning(
+def test_qwen3_asr_operator_buckets_above_the_chunk_start_with_a_warning(
     monkeypatch, caplog
 ) -> None:
     recorded = _patch_engine_dependencies(monkeypatch, want_cuda_graph=True)
@@ -702,7 +693,7 @@ def test_qwen3_asr_operator_buckets_above_the_budget_start_with_a_warning(
     assert recorded.build_kwargs["cuda_graph_bs_prefill"] == [1024, 8192]
     assert recorded.build_kwargs["cuda_graph_max_bs_prefill"] == 8192
     assert list(attested.cuda_graph_config.prefill.bs) == [1024, 8192]
-    assert "max=8192 exceeds the per-forward token budget 4096" in caplog.text
+    assert "max=8192 exceeds chunked_prefill_size=4096" in caplog.text
 
 
 @pytest.mark.parametrize(

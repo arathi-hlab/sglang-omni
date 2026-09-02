@@ -255,28 +255,13 @@ def validate_generation_batch_policy(
         )
 
 
-def _prefill_token_budget(server_args: Any) -> int | None:
-    """Per-forward token budget for prefill graph buckets: the positive
-    minimum of chunked_prefill_size, max_prefill_tokens and the declared
-    prefill graph cap."""
-    candidates = (
-        server_args.chunked_prefill_size,
-        server_args.max_prefill_tokens,
-        server_args.cuda_graph_config.prefill.max_bs,
-    )
-    positive = [
-        int(value) for value in candidates if value is not None and int(value) > 0
-    ]
-    return min(positive) if positive else None
-
-
 def _validate_prefill_graph_policy(
     server_args: Any,
     cuda_graph_enabled: bool,
     errors: list[str],
 ) -> None:
     """Validate the resolved prefill CUDA graph policy: breakable backend
-    only, with the bucket list checked against the per-forward token budget."""
+    only, with the bucket list checked against the chunked prefill ceiling."""
     backend = get_prefill_cuda_graph_backend(server_args)
     if backend == CudaGraphBackend.DISABLED:
         return
@@ -310,9 +295,10 @@ def _validate_prefill_graph_policy(
     prefill_cfg = server_args.cuda_graph_config.prefill
     if not prefill_cfg.bs:
         logger.warning(
-            "breakable prefill CUDA graphs require a token budget: "
-            f"chunked_prefill_size={server_args.chunked_prefill_size} and "
-            "cuda_graph_max_bs_prefill is unset, so SGLang captures no prefill graphs"
+            "breakable prefill CUDA graphs require a positive prefill graph cap: "
+            f"chunked_prefill_size={server_args.chunked_prefill_size}, "
+            f"cuda_graph_max_bs_prefill={prefill_cfg.max_bs}, so SGLang captures "
+            "no prefill graphs"
         )
         return
     buckets = _normalize_cuda_graph_bs(
@@ -321,17 +307,17 @@ def _validate_prefill_graph_policy(
     if buckets is None:
         return
 
-    # note (ratish): a prefill batch never exceeds min(chunked_prefill_size,
-    # max_prefill_tokens), so buckets above it only cost capture time and
-    # graph memory. Upstream leaves that to the operator, omni reports it.
-    budget = _prefill_token_budget(server_args)
-    if budget is not None and buckets[-1] > budget:
+    # note (ratish): with chunked prefill on, PrefillAdder bounds every
+    # admission by the remaining chunk, so one prefill forward never carries
+    # more than chunked_prefill_size tokens and buckets above it are never
+    # scheduled. max_prefill_tokens is a cumulative stop that a single
+    # admission can overshoot, and without chunking the first request is
+    # admitted at any length, so neither one is a per-forward ceiling.
+    chunk = server_args.chunked_prefill_size
+    if chunk is not None and int(chunk) > 0 and buckets[-1] > int(chunk):
         logger.warning(
-            f"cuda_graph_bs_prefill max={buckets[-1]} exceeds the per-forward "
-            f"token budget {budget} (chunked_prefill_size="
-            f"{server_args.chunked_prefill_size}, max_prefill_tokens="
-            f"{server_args.max_prefill_tokens}, cuda_graph_max_bs_prefill="
-            f"{prefill_cfg.max_bs}), buckets above it are captured but not used"
+            f"cuda_graph_bs_prefill max={buckets[-1]} exceeds chunked_prefill_size="
+            f"{chunk}, buckets above it are captured but cannot be scheduled"
         )
 
     # The largest eager-falling length under bucket nxt is

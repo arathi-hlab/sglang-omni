@@ -146,47 +146,53 @@ def test_prefill_max_bs_above_the_top_bucket_is_accepted(caplog) -> None:
     assert not caplog.records
 
 
-@pytest.mark.parametrize(
-    ("server_args_kwargs", "budget"),
-    [
-        ({"prefill_bs": (128, 256), "prefill_max_bs": 128}, 128),
-        ({"prefill_bs": (4096, 12288), "chunked_prefill_size": 8192}, 8192),
-        (
-            {
-                "prefill_bs": (8192, 32768),
-                "prefill_max_bs": 32768,
-                "chunked_prefill_size": -1,
-                "max_prefill_tokens": 16384,
-            },
-            16384,
-        ),
-        (
-            {
-                "prefill_bs": (1024, 4096),
-                "prefill_max_bs": 4096,
-                "chunked_prefill_size": 0,
-                "max_prefill_tokens": 2048,
-            },
-            2048,
-        ),
-    ],
-)
-def test_buckets_above_the_token_budget_warn_and_stay(
-    server_args_kwargs: dict[str, Any], budget: int, caplog
-) -> None:
-    server_args = _server_args(prefill_backend="breakable", **server_args_kwargs)
+def test_buckets_above_the_chunk_warn_and_stay(caplog) -> None:
+    server_args = _server_args(
+        prefill_backend="breakable",
+        prefill_bs=(4096, 12288),
+        chunked_prefill_size=8192,
+    )
 
     with caplog.at_level(logging.WARNING):
         _validate(server_args)
 
-    prefill = server_args.cuda_graph_config.prefill
-    assert prefill.bs == server_args_kwargs["prefill_bs"]
-    assert prefill.max_bs == server_args_kwargs.get("prefill_max_bs")
-    top = server_args_kwargs["prefill_bs"][-1]
-    assert f"max={top} exceeds the per-forward token budget {budget}" in caplog.text
+    assert server_args.cuda_graph_config.prefill.bs == (4096, 12288)
+    assert "max=12288 exceeds chunked_prefill_size=8192" in caplog.text
 
 
-def test_top_bucket_equal_to_the_token_budget_is_silent(caplog) -> None:
+@pytest.mark.parametrize(
+    "server_args_kwargs",
+    [
+        {
+            "prefill_bs": (4096, 8192),
+            "prefill_max_bs": 8192,
+            "chunked_prefill_size": 8192,
+            "max_prefill_tokens": 4096,
+        },
+        {
+            "prefill_bs": (16384, 32768),
+            "prefill_max_bs": 32768,
+            "chunked_prefill_size": -1,
+            "max_prefill_tokens": 16384,
+        },
+        {
+            "prefill_bs": (2048, 4096),
+            "prefill_max_bs": 4096,
+            "chunked_prefill_size": 0,
+            "max_prefill_tokens": 2048,
+        },
+    ],
+)
+def test_only_the_chunk_bounds_a_prefill_forward(
+    server_args_kwargs: dict[str, Any], caplog
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        _validate(_server_args(prefill_backend="breakable", **server_args_kwargs))
+
+    assert not caplog.records
+
+
+def test_top_bucket_equal_to_the_chunk_is_silent(caplog) -> None:
     with caplog.at_level(logging.WARNING):
         _validate(
             _server_args(
@@ -211,7 +217,7 @@ def test_empty_derived_ladder_passes_with_a_warning(caplog) -> None:
             )
         )
 
-    assert "require a token budget" in caplog.text
+    assert "require a positive prefill graph cap" in caplog.text
 
 
 @pytest.mark.parametrize(
