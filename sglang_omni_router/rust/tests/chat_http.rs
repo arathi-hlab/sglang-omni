@@ -27,8 +27,8 @@ struct Captured {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum WorkerBehavior {
     ConsumeRequest,
-    RejectAfterHeaders,
-    StreamWithoutReading,
+    RespondAfterHeaders(&'static [u8]),
+    IgnoreRequest,
 }
 
 struct Worker {
@@ -51,13 +51,13 @@ impl Worker {
         Self::start_with_guard(guard, WorkerBehavior::ConsumeRequest)
     }
 
-    fn start_early_response() -> Self {
+    fn start_early_response(response: &'static [u8]) -> Self {
         let guard = Rc::new(
             SOCKET_TEST_LOCK
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        Self::start_with_guard(guard, WorkerBehavior::RejectAfterHeaders)
+        Self::start_with_guard(guard, WorkerBehavior::RespondAfterHeaders(response))
     }
 
     fn start_stalled_upload() -> Self {
@@ -66,7 +66,7 @@ impl Worker {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        Self::start_with_guard(guard, WorkerBehavior::StreamWithoutReading)
+        Self::start_with_guard(guard, WorkerBehavior::IgnoreRequest)
     }
 
     fn start_pair() -> (Self, Self) {
@@ -90,12 +90,10 @@ impl Worker {
         let stop = Arc::new(AtomicBool::new(false));
         let healthy = Arc::new(AtomicBool::new(true));
         let health_requests = Arc::new(AtomicUsize::new(0));
-        let generation_requests = Arc::new(AtomicUsize::new(0));
         let captured = Arc::new(Mutex::new(Vec::new()));
         let thread_stop = Arc::clone(&stop);
         let thread_healthy = Arc::clone(&healthy);
         let thread_health_requests = Arc::clone(&health_requests);
-        let thread_generation_requests = Arc::clone(&generation_requests);
         let thread_captured = Arc::clone(&captured);
         let thread = thread::spawn(move || {
             let mut connections = Vec::new();
@@ -105,16 +103,8 @@ impl Worker {
                         let captures = Arc::clone(&thread_captured);
                         let healthy = Arc::clone(&thread_healthy);
                         let health_requests = Arc::clone(&thread_health_requests);
-                        let generation_requests = Arc::clone(&thread_generation_requests);
                         connections.push(thread::spawn(move || {
-                            serve_connection(
-                                stream,
-                                captures,
-                                healthy,
-                                health_requests,
-                                generation_requests,
-                                behavior,
-                            );
+                            serve_connection(stream, captures, healthy, health_requests, behavior);
                         }));
                     }
                     Ok((_stream, _peer)) => {}
@@ -206,7 +196,6 @@ fn serve_connection(
     captured: Arc<Mutex<Vec<Captured>>>,
     healthy: Arc<AtomicBool>,
     health_requests: Arc<AtomicUsize>,
-    generation_requests: Arc<AtomicUsize>,
     behavior: WorkerBehavior,
 ) {
     stream
@@ -226,25 +215,17 @@ fn serve_connection(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 );
                 health_requests.fetch_add(1, Ordering::AcqRel);
-            } else if behavior == WorkerBehavior::RejectAfterHeaders {
-                write_response(
-                    &mut stream,
-                    b"HTTP/1.1 422 Unprocessable Entity\r\nContent-Type: application/json\r\nContent-Length: 18\r\nConnection: close\r\n\r\n{\"early\":\"reject\"}",
-                );
             } else {
-                let request = generation_requests.fetch_add(1, Ordering::AcqRel);
-                if request == 0 {
-                    write_response(
-                        &mut stream,
-                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\nB\r\ndata: one\n\n\r\n",
-                    );
-                    thread::sleep(Duration::from_secs(3));
-                    write_response(&mut stream, b"E\r\ndata: [DONE]\n\n\r\n0\r\n\r\n");
-                } else {
-                    write_response(
-                        &mut stream,
-                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
-                    );
+                captured.lock().expect("record request").push(Captured {
+                    head,
+                    body: Vec::new(),
+                });
+                match behavior {
+                    WorkerBehavior::RespondAfterHeaders(response) => {
+                        write_response(&mut stream, response);
+                    }
+                    WorkerBehavior::IgnoreRequest => thread::sleep(Duration::from_secs(3)),
+                    WorkerBehavior::ConsumeRequest => unreachable!(),
                 }
             }
         }
@@ -973,9 +954,8 @@ fn early_upload_eof_and_downstream_disconnect_release_admission() {
     );
 }
 
-#[test]
-fn early_upstream_response_is_relayed_before_upload_completion() {
-    let worker = Worker::start_early_response();
+fn assert_early_response_is_rejected(response: &'static [u8]) {
+    let worker = Worker::start_early_response(response);
     let router = RouterProcess::start(worker.address, 1, 2_000, false);
     let mut client = TcpStream::connect(router.address).expect("connect streaming upload");
     client
@@ -992,16 +972,29 @@ fn early_upstream_response_is_relayed_before_upload_completion() {
         .read_to_end(&mut response)
         .expect("read early upstream response");
 
-    assert_eq!(status(&response), 422);
+    assert_eq!(status(&response), 502);
     assert!(
-        response
+        !response
             .windows(b"early".len())
             .any(|part| part == b"early")
+    );
+
+    let released = post_when_capacity_releases(router.address);
+    assert_ne!(status(&released), 429);
+}
+
+#[test]
+fn early_upstream_response_is_rejected_before_upload_completion() {
+    assert_early_response_is_rejected(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+    );
+    assert_early_response_is_rejected(
+        b"HTTP/1.1 422 Unprocessable Entity\r\nContent-Type: application/json\r\nContent-Length: 18\r\nConnection: close\r\n\r\n{\"early\":\"reject\"}",
     );
 }
 
 #[test]
-fn upload_deadline_survives_early_stream_commitment() {
+fn outer_deadline_bounds_a_backpressured_upload() {
     let worker = Worker::start_stalled_upload();
     let router = RouterProcess::start_configured(
         &[("worker-a", worker.address, false, GenerationProfile::Text)],
@@ -1011,10 +1004,7 @@ fn upload_deadline_survives_early_stream_commitment() {
         "round_robin",
         64 * 1024 * 1024,
     );
-    let mut reader = TcpStream::connect(router.address).expect("connect stalled upload");
-    reader
-        .set_read_timeout(Some(DEADLINE))
-        .expect("bound stalled-upload read");
+    let reader = TcpStream::connect(router.address).expect("connect stalled upload");
     let mut writer = reader.try_clone().expect("clone stalled-upload client");
     writer
         .set_write_timeout(Some(DEADLINE))
@@ -1033,22 +1023,14 @@ fn upload_deadline_survives_early_stream_commitment() {
         }
     });
 
-    let mut committed = [0_u8; 512];
-    let count = reader
-        .read(&mut committed)
-        .expect("read committed SSE prefix");
-    assert!(committed[..count].starts_with(b"HTTP/1.1 200"));
+    worker.wait_for_requests(1);
 
     let release_started = Instant::now();
     let released = post_when_capacity_releases(router.address);
-    assert_ne!(
-        status(&released),
-        429,
-        "post-commit upload deadline retained the sole admission permit"
-    );
+    assert_eq!(status(&released), 504);
     assert!(
         release_started.elapsed() < Duration::from_secs(2),
-        "capacity was released only when the worker ended the response"
+        "capacity was released only when the worker closed the request"
     );
     drop(reader);
     upload.join().expect("join stalled-upload writer");

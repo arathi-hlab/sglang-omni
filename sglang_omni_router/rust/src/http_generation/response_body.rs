@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -8,8 +7,6 @@ use thiserror::Error;
 
 use crate::worker_pool::RequestLease;
 
-use super::request_body::{SharedUploadState, UploadState};
-
 #[derive(Debug, Error)]
 #[error("upstream response body terminated")]
 pub(crate) struct RelayError;
@@ -18,26 +15,14 @@ pub(crate) struct RelayError;
 pub(crate) struct DirectResponseBody {
     inner: Option<reqwest::Body>,
     lease: Option<RequestLease>,
-    upload: Option<SharedUploadState>,
-    upload_deadline: Option<Pin<Box<tokio::time::Sleep>>>,
     terminal: bool,
 }
 
 impl DirectResponseBody {
-    pub(crate) fn new(
-        inner: reqwest::Body,
-        lease: RequestLease,
-        upload: Option<SharedUploadState>,
-        deadline: tokio::time::Instant,
-    ) -> Self {
-        let upload_deadline = upload
-            .as_ref()
-            .map(|_| Box::pin(tokio::time::sleep_until(deadline)));
+    pub(crate) fn new(inner: reqwest::Body, lease: RequestLease) -> Self {
         Self {
             inner: Some(inner),
             lease: Some(lease),
-            upload,
-            upload_deadline,
             terminal: false,
         }
     }
@@ -52,35 +37,11 @@ impl DirectResponseBody {
         }
         drop(self.inner.take());
         drop(self.lease.take());
-        drop(self.upload.take());
-        drop(self.upload_deadline.take());
     }
 
     fn fail(&mut self, upstream_failure: bool) -> Poll<Option<Result<Frame<Bytes>, RelayError>>> {
         self.terminalize(upstream_failure);
         Poll::Ready(Some(Err(RelayError)))
-    }
-
-    fn poll_upload(&mut self, cx: &mut Context<'_>) -> Result<(), RelayError> {
-        let Some(upload) = self.upload.as_ref() else {
-            return Ok(());
-        };
-        let state = upload.poll_state(cx).map_err(|_| RelayError)?;
-        match state {
-            UploadState::Complete => {
-                self.upload = None;
-                self.upload_deadline = None;
-                Ok(())
-            }
-            UploadState::Failed(_) => Err(RelayError),
-            UploadState::Incomplete => {
-                let expired = self
-                    .upload_deadline
-                    .as_mut()
-                    .is_none_or(|deadline| deadline.as_mut().poll(cx).is_ready());
-                if expired { Err(RelayError) } else { Ok(()) }
-            }
-        }
     }
 }
 
@@ -100,9 +61,6 @@ impl http_body::Body for DirectResponseBody {
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         if self.terminal {
             return Poll::Ready(None);
-        }
-        if self.poll_upload(cx).is_err() {
-            return self.fail(false);
         }
         let Some(inner) = self.inner.as_mut() else {
             return self.fail(true);

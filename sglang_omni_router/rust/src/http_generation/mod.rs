@@ -101,8 +101,8 @@ async fn relay_direct(
     request_id: HeaderValue,
     deadline: tokio::time::Instant,
 ) -> Result<Response<Body>, HttpFault> {
-    let state = SharedUploadState::new(UploadState::Incomplete);
-    let direct = DirectRequestBody::new(body, length, state.clone(), deadline);
+    let state = SharedUploadState::for_length(length);
+    let direct = DirectRequestBody::new(body, length, state.clone());
     send_once(
         generation,
         OutgoingBody {
@@ -166,7 +166,13 @@ async fn send_once(
             return Err(fault);
         }
     };
-    if let Some(fault) = failed_upload(&outgoing.upload)? {
+    if let Err(fault) = require_completed_upload(&outgoing.upload) {
+        if fault == HttpFault::UpstreamProtocolError {
+            tracing::warn!(
+                worker = %lease.target().base_url(),
+                "worker responded before the request upload completed"
+            );
+        }
         return Err(fault);
     }
     let response: axum::http::Response<reqwest::Body> = response.into();
@@ -178,28 +184,36 @@ async fn send_once(
             return Err(fault);
         }
     };
-    let relay = DirectResponseBody::new(body, lease, outgoing.upload, deadline);
+    let relay = DirectResponseBody::new(body, lease);
     let mut downstream = Response::new(Body::new(relay));
     *downstream.status_mut() = parts.status;
     *downstream.headers_mut() = headers;
     Ok(downstream)
 }
 
-fn failed_upload(upload: &Option<SharedUploadState>) -> Result<Option<HttpFault>, HttpFault> {
-    upload
+fn require_completed_upload(upload: &Option<SharedUploadState>) -> Result<(), HttpFault> {
+    match upload
         .as_ref()
         .map(SharedUploadState::snapshot)
-        .transpose()
-        .map(|state| {
-            state.and_then(|state| match state {
-                UploadState::Failed(fault) => Some(fault),
-                UploadState::Incomplete | UploadState::Complete => None,
-            })
-        })
+        .transpose()?
+    {
+        Some(UploadState::Incomplete) => Err(HttpFault::UpstreamProtocolError),
+        Some(UploadState::Failed(fault)) => Err(fault),
+        Some(UploadState::Complete) | None => Ok(()),
+    }
 }
 
 fn selected_send_fault(upload: &Option<SharedUploadState>) -> Result<HttpFault, HttpFault> {
-    Ok(failed_upload(upload)?.unwrap_or(HttpFault::UpstreamProtocolError))
+    match upload
+        .as_ref()
+        .map(SharedUploadState::snapshot)
+        .transpose()?
+    {
+        Some(UploadState::Failed(fault)) => Ok(fault),
+        Some(UploadState::Incomplete | UploadState::Complete) | None => {
+            Ok(HttpFault::UpstreamProtocolError)
+        }
+    }
 }
 
 fn deadline_fault(upload: Option<&SharedUploadState>) -> HttpFault {
@@ -273,7 +287,7 @@ mod tests {
 
     use super::{
         HttpFault, SharedUploadState, UploadState, authorize_upstream_attempt_at, deadline_outcome,
-        failed_upload, selected_send_fault,
+        require_completed_upload, selected_send_fault,
     };
 
     #[test]
@@ -320,10 +334,22 @@ mod tests {
     }
 
     #[test]
-    fn completed_upstream_response_accepts_an_incomplete_upload() {
+    fn completed_upstream_response_requires_a_completed_upload() {
         let incomplete = Some(SharedUploadState::new(UploadState::Incomplete));
 
-        assert_eq!(failed_upload(&incomplete), Ok(None));
+        assert_eq!(
+            require_completed_upload(&incomplete),
+            Err(HttpFault::UpstreamProtocolError)
+        );
+        let complete = Some(SharedUploadState::new(UploadState::Complete));
+        assert_eq!(require_completed_upload(&complete), Ok(()));
+        let failed = Some(SharedUploadState::new(UploadState::Failed(
+            HttpFault::MalformedRequest,
+        )));
+        assert_eq!(
+            require_completed_upload(&failed),
+            Err(HttpFault::MalformedRequest)
+        );
     }
 
     #[test]

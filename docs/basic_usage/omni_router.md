@@ -224,9 +224,10 @@ disabled. Request and response bodies use direct backpressure without a body
 pump, application queue, or extra relay task.
 
 The request deadline covers upload, connection establishment, and upstream
-response headers. If a worker commits a response before consuming the complete
-upload, the upload remains bounded by the same deadline. After upload
-completion, the response has no total wall-clock limit.
+response headers. A final worker response received before the upload completes
+is rejected as an upstream protocol error and is not committed downstream.
+After response headers are committed, the response has no total wall-clock
+limit.
 
 Responses still end normally on upstream EOF or error, downstream disconnect,
 or process drain.
