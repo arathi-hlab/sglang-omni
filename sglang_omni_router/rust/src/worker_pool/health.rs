@@ -27,7 +27,7 @@ impl WorkerHealth {
 }
 
 /// Atomic health cell. Release/Acquire publishes only the state transition;
-/// capability and capacity remain immutable/semaphore-owned respectively.
+/// capability remains immutable and load is owned by request leases.
 pub(super) struct AtomicHealth(AtomicU8);
 
 impl AtomicHealth {
@@ -211,15 +211,15 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use tokio::sync::{Notify, Semaphore};
+    use tokio::sync::Notify;
 
     use super::{AtomicHealth, HealthSupervisor, ProbeTracker, WorkerHealth};
+    use crate::worker_pool::WorkerRecord;
     use crate::worker_pool::profile::{
         InputModality, MessageContentForm, OutputModality, RegistrationId, ServiceProfile,
         StreamMode, TrustDomain, WorkerId,
     };
     use crate::worker_pool::resolver::{ResolvedTarget, build_health_client};
-    use crate::worker_pool::{CapacitySlot, WorkerRecord};
 
     fn test_target(address: SocketAddr) -> ResolvedTarget {
         ResolvedTarget::from_parts(&format!("http://{address}/"), "/health")
@@ -242,10 +242,7 @@ mod tests {
                 chat_audio_formats: Vec::new(),
                 stream_modes: vec![StreamMode::NonStreaming],
             }],
-            capacity: CapacitySlot {
-                limit: 1,
-                semaphore: Arc::new(Semaphore::new(1)),
-            },
+            active_requests: AtomicUsize::new(0),
             health: AtomicHealth::unknown(),
             immediate_probe: Notify::new(),
         })

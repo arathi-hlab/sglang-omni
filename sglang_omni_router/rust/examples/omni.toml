@@ -40,9 +40,6 @@ trust_domain = "local"
 default_model_id = "omni-model"
 health_path = "/health"
 
-[workers.capacity]
-generation_http = 16
-
 [[workers.service_profiles]]
 service = "generation_http"
 model_ids = ["omni-model"]
@@ -59,9 +56,6 @@ base_url = "http://127.0.0.1:8001/"
 trust_domain = "local"
 default_model_id = "omni-model"
 health_path = "/health"
-
-[workers.capacity]
-generation_http = 16
 
 [[workers.service_profiles]]
 service = "generation_http"

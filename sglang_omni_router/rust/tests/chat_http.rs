@@ -398,7 +398,6 @@ impl RouterProcess {
         Self::start_configured(
             &[("worker-a", worker, hostname, GenerationProfile::Text)],
             global,
-            global,
             timeout_ms,
             "round_robin",
             1_048_576,
@@ -410,20 +409,12 @@ impl RouterProcess {
         global: u32,
         timeout_ms: u64,
     ) -> Self {
-        Self::start_configured(
-            workers,
-            global,
-            global,
-            timeout_ms,
-            "round_robin",
-            1_048_576,
-        )
+        Self::start_configured(workers, global, timeout_ms, "round_robin", 1_048_576)
     }
 
     fn start_configured(
         workers: &[(&str, SocketAddr, bool, GenerationProfile)],
         global: u32,
-        worker_capacity: u32,
         timeout_ms: u64,
         strategy: &str,
         streamed_request_max_bytes: u64,
@@ -447,7 +438,7 @@ impl RouterProcess {
             };
             let profile_fields = profile.manifest_fields();
             worker_config.push_str(&format!(
-                "\n[[workers]]\nworker_id = \"{worker_id}\"\nbase_url = \"{base_url}\"\ntrust_domain = \"local\"\ndefault_model_id = \"omni\"\nhealth_path = \"/health\"\n\n[workers.capacity]\ngeneration_http = {worker_capacity}\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"omni\"]\n{profile_fields}\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\"]\n"
+                "\n[[workers]]\nworker_id = \"{worker_id}\"\nbase_url = \"{base_url}\"\ntrust_domain = \"local\"\ndefault_model_id = \"omni\"\nhealth_path = \"/health\"\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"omni\"]\n{profile_fields}\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\"]\n"
             ));
         }
         fs::write(
@@ -547,7 +538,7 @@ fn post(address: SocketAddr, body: &[u8], request_id: Option<&str>) -> Vec<u8> {
     raw_request(address, &request).expect("complete routed request")
 }
 
-fn post_when_capacity_releases(address: SocketAddr) -> Vec<u8> {
+fn post_when_admission_releases(address: SocketAddr) -> Vec<u8> {
     let deadline = Instant::now() + DEADLINE;
     loop {
         let response = post(address, b"{}", None);
@@ -556,7 +547,7 @@ fn post_when_capacity_releases(address: SocketAddr) -> Vec<u8> {
         }
         assert!(
             Instant::now() < deadline,
-            "worker capacity remained reserved"
+            "router admission remained reserved"
         );
         thread::sleep(Duration::from_millis(2));
     }
@@ -824,25 +815,6 @@ fn homogeneous_replicas_rotate_and_unhealthy_workers_are_filtered() {
 }
 
 #[test]
-fn worker_capacity_is_independent_from_global_admission() {
-    let worker = Worker::start();
-    let router = RouterProcess::start_configured(
-        &[("worker-a", worker.address, false, GenerationProfile::Text)],
-        2,
-        1,
-        2_000,
-        "round_robin",
-        1_048_576,
-    );
-
-    let address = router.address;
-    let slow = thread::spawn(move || post(address, b"slow", None));
-    worker.wait_for_requests(1);
-    assert_eq!(status(&post(router.address, b"{}", None)), 429);
-    assert_eq!(status(&slow.join().expect("join slow client")), 200);
-}
-
-#[test]
 fn least_requests_prefers_the_less_occupied_replica() {
     let (first, second) = Worker::start_pair();
     let router = RouterProcess::start_configured(
@@ -851,7 +823,6 @@ fn least_requests_prefers_the_less_occupied_replica() {
             ("worker-b", second.address, false, GenerationProfile::Text),
         ],
         4,
-        2,
         2_000,
         "least_requests",
         1_048_576,
@@ -893,7 +864,7 @@ fn precommit_timeout_and_upstream_reset_are_bounded_and_release_admission() {
         String::from_utf8_lossy(&timeout),
         worker.captures()
     );
-    let recovered = post_when_capacity_releases(router.address);
+    let recovered = post_when_admission_releases(router.address);
     assert_ne!(
         status(&recovered),
         429,
@@ -946,7 +917,7 @@ fn early_upload_eof_and_downstream_disconnect_release_admission() {
     assert_ne!(count, 0);
     drop(disconnect);
 
-    let released = post_when_capacity_releases(router.address);
+    let released = post_when_admission_releases(router.address);
     assert_ne!(
         status(&released),
         429,
@@ -979,7 +950,7 @@ fn assert_early_response_is_rejected(response: &'static [u8]) {
             .any(|part| part == b"early")
     );
 
-    let released = post_when_capacity_releases(router.address);
+    let released = post_when_admission_releases(router.address);
     assert_ne!(status(&released), 429);
 }
 
@@ -998,7 +969,6 @@ fn outer_deadline_bounds_a_backpressured_upload() {
     let worker = Worker::start_stalled_upload();
     let router = RouterProcess::start_configured(
         &[("worker-a", worker.address, false, GenerationProfile::Text)],
-        1,
         1,
         300,
         "round_robin",
@@ -1026,7 +996,7 @@ fn outer_deadline_bounds_a_backpressured_upload() {
     worker.wait_for_requests(1);
 
     let release_started = Instant::now();
-    let released = post_when_capacity_releases(router.address);
+    let released = post_when_admission_releases(router.address);
     assert_eq!(status(&released), 504);
     assert!(
         release_started.elapsed() < Duration::from_secs(2),
@@ -1046,7 +1016,7 @@ fn upstream_failure_after_sse_commitment_releases_capacity() {
     assert!(response.windows(9).any(|part| part == b"data: one"));
     assert!(!response.windows(6).any(|part| part == b"[DONE]"));
 
-    let recovered = post_when_capacity_releases(router.address);
+    let recovered = post_when_admission_releases(router.address);
     assert_ne!(status(&recovered), 429);
 }
 

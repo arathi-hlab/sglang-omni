@@ -275,7 +275,6 @@ const fn map_admission(error: AdmissionError) -> HttpFault {
 const fn map_dispatch(error: DispatchError) -> HttpFault {
     match error {
         DispatchError::Unavailable => HttpFault::RouterUnavailable,
-        DispatchError::Overloaded => HttpFault::RouterOverloaded,
     }
 }
 

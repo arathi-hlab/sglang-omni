@@ -5,8 +5,9 @@ mod resolver;
 mod selection;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::Notify;
 
 use crate::config::{Config, RoutingStrategy};
 
@@ -18,19 +19,12 @@ pub(crate) use resolver::ResolvedTarget;
 use admission::AdmissionController;
 use health::AtomicHealth;
 use profile::{
-    MAX_WORKERS, RegistrationId, ServiceProfile, WorkerCapacityConfig, WorkerId,
-    generation_cohort_is_homogeneous,
+    MAX_WORKERS, RegistrationId, ServiceProfile, WorkerId, generation_cohort_is_homogeneous,
 };
 use resolver::{build_generation_client, build_health_client};
 use selection::Selector;
 
-struct CapacitySlot {
-    limit: usize,
-    semaphore: Arc<Semaphore>,
-}
-
-/// One static startup registration with independently updated health and
-/// exact generation-capacity ownership.
+/// One static startup registration with independently updated health and load.
 pub(super) struct WorkerRecord {
     worker_id: WorkerId,
     default_model_id: String,
@@ -38,7 +32,7 @@ pub(super) struct WorkerRecord {
     target: ResolvedTarget,
     trust_domain: TrustDomain,
     profiles: Vec<ServiceProfile>,
-    capacity: CapacitySlot,
+    active_requests: AtomicUsize,
     health: AtomicHealth,
     immediate_probe: Notify,
 }
@@ -47,10 +41,27 @@ impl WorkerRecord {
     fn is_routable(&self) -> bool {
         self.health.load() == WorkerHealth::Healthy
     }
+
+    fn load(&self) -> usize {
+        self.active_requests.load(Ordering::Relaxed)
+    }
+
+    fn increment_load(&self) {
+        self.active_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn decrement_load(&self) {
+        let previous =
+            self.active_requests
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    current.checked_sub(1)
+                });
+        debug_assert!(previous.is_ok(), "worker load cannot underflow");
+    }
 }
 
-/// Static-membership generation worker pool with bounded admission, exact capacity,
-/// deterministic policy state, and independently owned health.
+/// Static-membership generation worker pool with bounded admission,
+/// deterministic policy state, and independently owned health and load.
 pub(crate) struct WorkerPool {
     records: Vec<Arc<WorkerRecord>>,
     admission: AdmissionController,
@@ -101,7 +112,7 @@ impl WorkerPool {
                 target,
                 trust_domain: TrustDomain::new(worker.trust_domain.clone()),
                 profiles: worker.service_profiles.clone(),
-                capacity: build_capacity(&worker.capacity)?,
+                active_requests: AtomicUsize::new(0),
                 health: AtomicHealth::unknown(),
                 immediate_probe: Notify::new(),
             }));
@@ -140,98 +151,49 @@ impl WorkerPool {
         admission: AdmissionLease,
         matches: impl Fn(&WorkerRecord) -> bool,
     ) -> Result<RequestLease, DispatchError> {
-        let eligible_count = self
-            .records
-            .iter()
-            .filter(|record| matches(record) && record.is_routable())
-            .count();
+        let mut eligible = [0; MAX_WORKERS];
+        let mut eligible_count = 0;
+        for record in &self.records {
+            if matches(record) && record.is_routable() {
+                eligible[eligible_count] = record.registration_id.startup_ordinal();
+                eligible_count += 1;
+            }
+        }
         if eligible_count == 0 {
             return Err(DispatchError::Unavailable);
         }
+        let eligible = &eligible[..eligible_count];
         let policy_guard = self.selector.least_requests_guard();
         let selected = match self.selector.strategy() {
             RoutingStrategy::RoundRobin => {
                 let start = self.selector.start(eligible_count);
-                self.reserve_round_robin(start, &matches)
+                Arc::clone(&self.records[eligible[start]])
             }
-            RoutingStrategy::LeastRequests => self.reserve_least_requests(&matches),
+            RoutingStrategy::LeastRequests => self.select_least_requests(eligible),
         };
+        let lease = RequestLease::new(admission, selected);
         drop(policy_guard);
-        match selected {
-            Some((record, exact)) => Ok(RequestLease::new(admission, exact, record)),
-            None if self
-                .records
-                .iter()
-                .any(|record| matches(record) && record.is_routable()) =>
-            {
-                Err(DispatchError::Overloaded)
-            }
-            None => Err(DispatchError::Unavailable),
-        }
+        Ok(lease)
     }
 
-    fn reserve_round_robin(
-        &self,
-        start: usize,
-        matches: &impl Fn(&WorkerRecord) -> bool,
-    ) -> Option<(Arc<WorkerRecord>, tokio::sync::OwnedSemaphorePermit)> {
-        for pass in 0..2 {
-            let mut eligible_ordinal = 0;
-            for record in &self.records {
-                if !matches(record) || !record.is_routable() {
-                    continue;
-                }
-                let in_pass = if pass == 0 {
-                    eligible_ordinal >= start
-                } else {
-                    eligible_ordinal < start
-                };
-                eligible_ordinal += 1;
-                if in_pass
-                    && let Ok(exact) = Arc::clone(&record.capacity.semaphore).try_acquire_owned()
-                {
-                    return Some((Arc::clone(record), exact));
-                }
-            }
-        }
-        None
-    }
-
-    fn reserve_least_requests(
-        &self,
-        matches: &impl Fn(&WorkerRecord) -> bool,
-    ) -> Option<(Arc<WorkerRecord>, tokio::sync::OwnedSemaphorePermit)> {
+    fn select_least_requests(&self, eligible: &[usize]) -> Arc<WorkerRecord> {
         let mut minimum = usize::MAX;
         let mut ties = [0; MAX_WORKERS];
         let mut tie_count = 0;
-        for record in &self.records {
-            if !matches(record) || !record.is_routable() {
-                continue;
-            }
-            let available = record.capacity.semaphore.available_permits();
-            if available == 0 {
-                continue;
-            }
-            let index = record.registration_id.startup_ordinal();
-            let occupancy = record.capacity.limit - available;
-            if occupancy < minimum {
-                minimum = occupancy;
+        for &index in eligible {
+            let record = &self.records[index];
+            let load = record.load();
+            if load < minimum {
+                minimum = load;
                 ties[0] = index;
                 tie_count = 1;
-            } else if occupancy == minimum {
+            } else if load == minimum {
                 ties[tie_count] = index;
                 tie_count += 1;
             }
         }
-        if tie_count == 0 {
-            return None;
-        }
         let index = ties[self.selector.start(tie_count)];
-        let record = &self.records[index];
-        let exact = Arc::clone(&record.capacity.semaphore)
-            .try_acquire_owned()
-            .ok()?;
-        Some((Arc::clone(record), exact))
+        Arc::clone(&self.records[index])
     }
 
     pub(crate) fn content_blind_generation_http(
@@ -294,17 +256,6 @@ fn build_content_blind_generation_cohorts(
     result
 }
 
-fn build_capacity(
-    config: &WorkerCapacityConfig,
-) -> Result<CapacitySlot, crate::error::RouterError> {
-    let limit = usize::try_from(config.generation_http)
-        .map_err(|_| crate::error::RouterError::WorkerPoolInvariant)?;
-    Ok(CapacitySlot {
-        limit,
-        semaphore: Arc::new(Semaphore::new(limit)),
-    })
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -333,7 +284,6 @@ mod tests {
         ordinal: usize,
         trust: &str,
         model: &str,
-        limit: usize,
         service_profile: ServiceProfile,
     ) -> Arc<WorkerRecord> {
         let health = AtomicHealth::unknown();
@@ -349,17 +299,14 @@ mod tests {
             .expect("test target"),
             trust_domain: TrustDomain::new(trust.to_owned()),
             profiles: vec![service_profile],
-            capacity: CapacitySlot {
-                limit,
-                semaphore: Arc::new(Semaphore::new(limit)),
-            },
+            active_requests: AtomicUsize::new(0),
             health,
             immediate_probe: Notify::new(),
         })
     }
 
-    fn record(ordinal: usize, trust: &str, model: &str, limit: usize) -> Arc<WorkerRecord> {
-        record_with_profile(ordinal, trust, model, limit, profile(model))
+    fn record(ordinal: usize, trust: &str, model: &str) -> Arc<WorkerRecord> {
+        record_with_profile(ordinal, trust, model, profile(model))
     }
 
     fn pool(
@@ -387,24 +334,21 @@ mod tests {
         let local = TrustDomain::new(String::from("local"));
         let sole = pool(
             RoutingStrategy::RoundRobin,
-            vec![record(0, "local", "omni", 1)],
+            vec![record(0, "local", "omni")],
             4,
         );
         assert!(sole.content_blind_generation_http(&local).is_some());
 
         let replicas = pool(
             RoutingStrategy::RoundRobin,
-            vec![record(0, "local", "omni", 1), record(1, "local", "omni", 2)],
+            vec![record(0, "local", "omni"), record(1, "local", "omni")],
             4,
         );
         assert!(replicas.content_blind_generation_http(&local).is_some());
 
         let defaults_differ = pool(
             RoutingStrategy::RoundRobin,
-            vec![
-                record(0, "local", "omni", 1),
-                record(1, "local", "other", 1),
-            ],
+            vec![record(0, "local", "omni"), record(1, "local", "other")],
             4,
         );
         assert!(
@@ -451,8 +395,8 @@ mod tests {
             let heterogeneous = pool(
                 RoutingStrategy::RoundRobin,
                 vec![
-                    record(0, "local", "omni", 1),
-                    record_with_profile(1, "local", "omni", 1, different),
+                    record(0, "local", "omni"),
+                    record_with_profile(1, "local", "omni", different),
                 ],
                 4,
             );
@@ -463,14 +407,14 @@ mod tests {
             );
         }
 
-        let mut extra_row = record(1, "local", "omni", 1);
+        let mut extra_row = record(1, "local", "omni");
         Arc::get_mut(&mut extra_row)
             .expect("new test record is uniquely owned")
             .profiles
             .push(profile("other"));
         let row_count_differs = pool(
             RoutingStrategy::RoundRobin,
-            vec![record(0, "local", "omni", 1), extra_row],
+            vec![record(0, "local", "omni"), extra_row],
             4,
         );
         assert!(
@@ -481,18 +425,15 @@ mod tests {
 
         let separate = pool(
             RoutingStrategy::RoundRobin,
-            vec![
-                record(0, "local", "omni", 1),
-                record(1, "remote", "other", 1),
-            ],
+            vec![record(0, "local", "omni"), record(1, "remote", "other")],
             4,
         );
         assert!(separate.content_blind_generation_http(&local).is_some());
     }
 
     #[test]
-    fn round_robin_balances_and_skips_full_or_unhealthy_workers() {
-        let records = vec![record(0, "local", "omni", 1), record(1, "local", "omni", 1)];
+    fn round_robin_balances_and_skips_unhealthy_workers() {
+        let records = vec![record(0, "local", "omni"), record(1, "local", "omni")];
         let pool = pool(RoutingStrategy::RoundRobin, records.clone(), 8);
         let trust = TrustDomain::new(String::from("local"));
         let first = pool
@@ -520,9 +461,9 @@ mod tests {
     #[test]
     fn round_robin_rotates_over_sparse_eligible_workers_without_bias() {
         let records = vec![
-            record(0, "local", "omni", 1),
-            record(1, "remote", "other", 1),
-            record(2, "local", "omni", 1),
+            record(0, "local", "omni"),
+            record(1, "remote", "other"),
+            record(2, "local", "omni"),
         ];
         let pool = pool(RoutingStrategy::RoundRobin, records, 8);
         let trust = TrustDomain::new(String::from("local"));
@@ -542,10 +483,10 @@ mod tests {
     #[test]
     fn least_requests_rotates_equal_load_over_sparse_eligible_workers_without_bias() {
         let records = vec![
-            record(0, "remote", "other", 1),
-            record(1, "local", "omni", 1),
-            record(2, "remote", "other", 1),
-            record(3, "local", "omni", 1),
+            record(0, "remote", "other"),
+            record(1, "local", "omni"),
+            record(2, "remote", "other"),
+            record(3, "local", "omni"),
         ];
         let pool = pool(RoutingStrategy::LeastRequests, records, 8);
         let trust = TrustDomain::new(String::from("local"));
@@ -565,13 +506,12 @@ mod tests {
     #[test]
     fn least_requests_rotates_only_over_the_minimum_occupancy_tie() {
         let records = vec![
-            record(0, "local", "omni", 2),
-            record(1, "local", "omni", 2),
-            record(2, "local", "omni", 2),
+            record(0, "local", "omni"),
+            record(1, "local", "omni"),
+            record(2, "local", "omni"),
         ];
-        let _middle = Arc::clone(&records[1].capacity.semaphore)
-            .try_acquire_owned()
-            .expect("occupy middle worker");
+        let middle = Arc::clone(&records[1]);
+        middle.increment_load();
         let pool = pool(RoutingStrategy::LeastRequests, records, 8);
         let trust = TrustDomain::new(String::from("local"));
         let mut selected = Vec::new();
@@ -585,41 +525,13 @@ mod tests {
             drop(lease);
         }
         assert_eq!(selected, [0, 2, 0, 2, 0, 2]);
-    }
-
-    #[test]
-    fn least_requests_skips_full_workers_in_one_selection_pass() {
-        let records = (0..MAX_WORKERS)
-            .map(|ordinal| record(ordinal, "local", "omni", 1))
-            .collect::<Vec<_>>();
-        let held = records[..MAX_WORKERS - 1]
-            .iter()
-            .map(|record| {
-                Arc::clone(&record.capacity.semaphore)
-                    .try_acquire_owned()
-                    .expect("fill worker")
-            })
-            .collect::<Vec<_>>();
-        let pool = pool(RoutingStrategy::LeastRequests, records, 1);
-        let trust = TrustDomain::new(String::from("local"));
-        let lease = pool
-            .content_blind_generation_http(&trust)
-            .expect("homogeneous cohort")
-            .dispatch(pool.try_admit().expect("admit with full workers"))
-            .expect("dispatch to available worker");
-
-        assert_eq!(lease.registration_ordinal(), MAX_WORKERS - 1);
-        drop(lease);
-        drop(held);
+        middle.decrement_load();
     }
 
     #[test]
     fn least_requests_choose_and_reserve_is_linearized() {
         const REQUESTS: usize = 32;
-        let records = vec![
-            record(0, "local", "omni", REQUESTS),
-            record(1, "local", "omni", REQUESTS),
-        ];
+        let records = vec![record(0, "local", "omni"), record(1, "local", "omni")];
         let pool = Arc::new(pool(RoutingStrategy::LeastRequests, records, REQUESTS));
         let trust = TrustDomain::new(String::from("local"));
         let start = Arc::new(Barrier::new(REQUESTS + 1));
@@ -650,10 +562,10 @@ mod tests {
     }
 
     #[test]
-    fn exact_class_and_global_permits_release_on_every_drop() {
+    fn admission_and_worker_load_release_on_every_drop() {
         let pool = pool(
             RoutingStrategy::RoundRobin,
-            vec![record(0, "local", "omni", 1)],
+            vec![record(0, "local", "omni")],
             1,
         );
         let trust = TrustDomain::new(String::from("local"));
@@ -663,15 +575,15 @@ mod tests {
             .dispatch(pool.try_admit().expect("admit"))
             .expect("dispatch");
         assert_eq!(pool.admission.available(), (0, 0));
-        assert_eq!(pool.records[0].capacity.semaphore.available_permits(), 0);
+        assert_eq!(pool.records[0].load(), 1);
         drop(lease);
         assert_eq!(pool.admission.available(), (1, 1));
-        assert_eq!(pool.records[0].capacity.semaphore.available_permits(), 1);
+        assert_eq!(pool.records[0].load(), 0);
     }
 
     #[test]
     fn readiness_tracks_worker_health() {
-        let record = record(0, "local", "omni", 1);
+        let record = record(0, "local", "omni");
         record.health.store(WorkerHealth::Unknown);
         let pool = pool(RoutingStrategy::RoundRobin, vec![Arc::clone(&record)], 1);
         let trust = TrustDomain::new(String::from("local"));
@@ -684,7 +596,7 @@ mod tests {
     fn drain_rejects_new_admission_and_preserves_admitted_work() {
         let pool = pool(
             RoutingStrategy::RoundRobin,
-            vec![record(0, "local", "omni", 1)],
+            vec![record(0, "local", "omni")],
             1,
         );
         let trust = TrustDomain::new(String::from("local"));

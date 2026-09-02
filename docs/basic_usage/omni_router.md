@@ -8,14 +8,13 @@ health-aware selection, and backpressured streaming.
 ## Overview
 
 - OpenAI-compatible HTTP and WebSocket routes for Omni, TTS, and ASR workers.
-- Static worker manifests with explicit model, modality, media, and capacity
-  contracts.
+- Static worker manifests with explicit model, modality, and media contracts.
 - `round_robin` and `least_requests` routing over compatible healthy replicas.
 - Direct request streaming for homogeneous worker cohorts and bounded
   classification when routing depends on the request body.
 - Pooled upstream HTTP/1.1 connections with request-ID propagation and direct
   response backpressure.
-- Status-based health checks, exact admission and worker-capacity accounting,
+- Status-based health checks, exact admission and active-request accounting,
   Prometheus metrics, diagnostics, and graceful shutdown.
 
 ```mermaid
@@ -90,7 +89,7 @@ Choose the example that matches the worker service:
 | `examples/asr.toml` | Transcription and speech-to-English translation |
 
 The examples define two workers at `127.0.0.1:8000` and
-`127.0.0.1:8001`. Set the worker URLs, model IDs, capacities, and service
+`127.0.0.1:8001`. Set the worker URLs, model IDs, and service
 profiles to match the processes you are running.
 
 Validate the configuration before starting the router:
@@ -139,10 +138,10 @@ The top-level sections are:
 | `http_generation` | Chat request limits, trust domain, upstream timeouts, and pool settings |
 | `http_media` | Enabled media routes, request limits, trust domain, and upstream settings |
 | `websocket` | Speech and realtime routes with setup, connection, and close bounds |
-| `workers` | Worker identity, endpoint, health path, exact capacity, and service profiles |
+| `workers` | Worker identity, endpoint, health path, and service profiles |
 
 Each worker has a stable ID, base URL, trust domain, optional default model,
-health path, exact capacity table, and one or more correlated service profiles.
+health path and one or more correlated service profiles.
 A profile row describes a combination the worker supports; the router never
 combines independent fields from different rows.
 
@@ -150,8 +149,8 @@ DNS worker authorities are resolved when an upstream connection is opened, so
 health probes and new data connections follow DNS changes. Worker membership
 remains static for the process lifetime.
 
-Configuration limits are deployment budgets. Set admission, worker capacity,
-classification concurrency, connection-pool limits, and timeouts from the
+Configuration limits are deployment budgets. Set admission, classification
+concurrency, connection-pool limits, and timeouts from the
 expected workload and worker topology.
 
 ## Supported APIs
@@ -198,15 +197,15 @@ input and output modalities, response format, and stream mode. Classification
 runs under one shared concurrency limit. The original bytes are forwarded
 without reconstructing JSON or multipart content.
 
-Classification completes before worker-capacity reservation, so classification
-does not occupy a worker slot or upstream connection.
+Classification completes before worker selection, so classification does not
+occupy an upstream connection.
 
 ### Worker selection
 
 `round_robin` rotates across compatible healthy replicas. `least_requests`
-compares exact in-flight occupancy for the required worker-capacity class and
-rotates equal ties. Selection reserves worker capacity before dispatch and
-performs no network or body work while holding the policy lock.
+compares active requests and rotates equal ties. Selection increments the
+chosen worker's load before dispatch and performs no network or body work while
+holding the policy lock.
 
 Routing policy is workload-specific. Use full-corpus measurements at the target
 concurrency to choose between the supported policies.
@@ -214,9 +213,9 @@ concurrency to choose between the supported policies.
 ### Admission and backpressure
 
 Global and per-service admission are fail-fast. One request owns its admission
-and worker-capacity leases until response EOF, upstream error, or downstream
-cancellation. A per-service admission limit below the sum of matching worker
-capacities intentionally caps the complete pool.
+and worker-load guard until response EOF, upstream error, or downstream
+cancellation. The worker remains responsible for its execution and queue
+capacity.
 
 The router sends one upstream request through a shared HTTP/1.1 connection
 pool. Redirects, ambient proxies, retries, and automatic decompression are
@@ -260,26 +259,26 @@ worker-local voice data.
 Workers start with unknown health. Each worker has one serial probe loop that
 applies the configured consecutive success and failure thresholds.
 Transport and upstream protocol failures can request an immediate coalesced
-probe. Application responses and capacity exhaustion do not directly change
-worker health.
+probe. Application responses do not directly change worker health.
 
 `GET /ready` returns `200` while the process is serving and every enabled
 generation, media, and WebSocket service has a compatible healthy worker.
 Readiness also requires the configured managed-voice owner to be healthy and
-compatible. Current capacity occupancy does not change readiness.
+compatible. Current worker load does not change readiness.
 
 ## Operations
 
 `/v1/models` returns a sorted, deduplicated inventory built from worker defaults
 and correlated profile model IDs. `/metrics` exposes Prometheus lifecycle,
-readiness, health, admission, and worker-capacity gauges. `/diagnostics` returns
+readiness, health, admission, and worker-load gauges. `/diagnostics` returns
 bounded deterministic JSON for lifecycle, readiness, admission, and configured
 workers.
 
 Operations responses snapshot router-local state and never contact workers.
-In-flight values come from the semaphores that enforce capacity; the router
-does not maintain duplicate load counters. Metric labels use fixed vocabularies
-instead of worker IDs, model IDs, request IDs, paths, or client input.
+Admission values come from the semaphores that enforce router limits. Worker
+load comes from the same counters used by `least_requests`. Metric labels use
+fixed vocabularies instead of worker IDs, model IDs, request IDs, paths, or
+client input.
 
 Structured logging covers lifecycle events, health transitions, and exceptional
 conditions. `logging.filter` accepts a tracing filter expression, and

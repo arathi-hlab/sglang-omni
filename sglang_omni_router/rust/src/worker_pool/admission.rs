@@ -17,8 +17,6 @@ pub(crate) enum AdmissionError {
 pub(crate) enum DispatchError {
     #[error("matching workers are unavailable")]
     Unavailable,
-    #[error("matching worker capacity is full")]
-    Overloaded,
 }
 
 /// Global and generation-class ingress ownership, released exactly once.
@@ -27,37 +25,49 @@ pub(crate) struct AdmissionLease {
     _global: OwnedSemaphorePermit,
 }
 
-/// Exact generation-worker ownership retained through response termination.
+/// Active worker load retained through response termination.
+struct WorkerLoadGuard {
+    registration: Arc<WorkerRecord>,
+}
+
+impl WorkerLoadGuard {
+    fn new(registration: Arc<WorkerRecord>) -> Self {
+        registration.increment_load();
+        Self { registration }
+    }
+}
+
+impl Drop for WorkerLoadGuard {
+    fn drop(&mut self) {
+        self.registration.decrement_load();
+    }
+}
+
+/// Admission and worker load retained through response termination.
 pub(crate) struct RequestLease {
-    _exact: OwnedSemaphorePermit,
     _admission: AdmissionLease,
-    pub(super) registration: Arc<WorkerRecord>,
+    load: WorkerLoadGuard,
 }
 
 impl RequestLease {
-    pub(super) fn new(
-        admission: AdmissionLease,
-        exact: OwnedSemaphorePermit,
-        registration: Arc<WorkerRecord>,
-    ) -> Self {
+    pub(super) fn new(admission: AdmissionLease, registration: Arc<WorkerRecord>) -> Self {
         Self {
-            _exact: exact,
             _admission: admission,
-            registration,
+            load: WorkerLoadGuard::new(registration),
         }
     }
 
     pub(crate) fn target(&self) -> &ResolvedTarget {
-        &self.registration.target
+        &self.load.registration.target
     }
 
     pub(crate) fn request_immediate_probe(&self) {
-        self.registration.immediate_probe.notify_one();
+        self.load.registration.immediate_probe.notify_one();
     }
 
     #[cfg(test)]
     pub(super) fn registration_ordinal(&self) -> usize {
-        self.registration.registration_id.startup_ordinal()
+        self.load.registration.registration_id.startup_ordinal()
     }
 }
 

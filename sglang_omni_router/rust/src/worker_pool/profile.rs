@@ -56,14 +56,7 @@ pub(crate) struct WorkerConfig {
     pub(crate) default_model_id: String,
     #[serde(default = "default_health_path")]
     pub(crate) health_path: String,
-    pub(crate) capacity: WorkerCapacityConfig,
     pub(crate) service_profiles: Vec<ServiceProfile>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct WorkerCapacityConfig {
-    pub(crate) generation_http: u32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
@@ -270,12 +263,6 @@ pub(crate) fn validate_workers(workers: &[WorkerConfig]) -> Result<(), ConfigErr
                 "worker origins must be unique",
             ));
         }
-        if worker.capacity.generation_http == 0 || worker.capacity.generation_http > 65_535 {
-            return Err(ConfigError::invalid(
-                "workers.capacity.generation_http",
-                "must be between 1 and 65535",
-            ));
-        }
         if worker.service_profiles.is_empty()
             || worker.service_profiles.len() > MAX_PROFILES_PER_WORKER
         {
@@ -417,7 +404,6 @@ mod tests {
             trust_domain: String::from("local"),
             default_model_id: String::from("omni"),
             health_path: String::from("/health"),
-            capacity: WorkerCapacityConfig { generation_http: 2 },
             service_profiles: vec![profile("omni")],
         }
     }
