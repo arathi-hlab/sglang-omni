@@ -127,10 +127,10 @@ conditions flush any buffered text before the final transcript event.
 
 Biasing raises the model's preference for the supplied terms. It does not
 force them: a term the audio does not contain will not be inserted, and an
-irrelevant list pushes the preference the wrong way and hurts accuracy. Keep
-the list short and relevant. In our measurements accuracy peaked around 20
-terms, and because the text is prefilled with every request, longer lists make
-every request slower.
+irrelevant list biases the model toward words that were never spoken, which
+hurts accuracy. A short, relevant list works best — in testing, accuracy
+stopped improving past roughly 20 terms, while latency kept growing because
+the text is prefilled with every request.
 
 `verbose_json` uses the model adapter's verbose response schema and includes
 duration-based usage (rounded-up audio seconds) when duration probing succeeds.
