@@ -57,8 +57,16 @@ def fill_prefill_terminal_bucket(server_args: ServerArgs) -> None:
 
     SGLang's decode generator appends an off-grid max_bs, its prefill
     generator does not, and the prefill runner replays nothing above the top
-    captured bucket. A declared list is left as declared.
+    captured bucket. A declared list is left as declared. The fill runs after
+    ServerArgs derived mem_fraction_static, so the appended bucket sits outside
+    that heuristic's per-bucket graph reserve (8 MB), and the env-gated
+    post-capture KV sizing re-reads the final list at runtime.
     """
+    # note (ratish): SGLang skips its resolution pipeline for the dummy model
+    # path and leaves cuda_graph_config unset, the same state its own
+    # _validate_cuda_graph_config checks for.
+    if server_args.cuda_graph_config is None:
+        return
     prefill = server_args.cuda_graph_config.prefill
     if prefill.backend == CudaGraphBackend.DISABLED:
         return
