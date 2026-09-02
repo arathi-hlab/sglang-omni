@@ -38,7 +38,7 @@ impl Drop for TestDir {
 
 fn valid_config(listen: &str, drain_timeout_ms: u64, filter: &str) -> String {
     format!(
-        "schema_version = 1\n\n[server]\nlisten = \"{listen}\"\n\n[shutdown]\ndrain_timeout_ms = {drain_timeout_ms}\n\n[logging]\nformat = \"json\"\nfilter = \"{filter}\"\n\n[router]\nstrategy = \"round_robin\"\nmax_concurrent_classifications = 4\n\n[admission]\nglobal = 128\ngeneration_http = 64\n\n[health]\ninterval_ms = 1000\ntimeout_ms = 500\nsuccess_threshold = 2\nfailure_threshold = 3\n\n[http]\nbuffered_request_total_bytes = 8388608\nconnect_timeout_ms = 1000\npool_idle_timeout_ms = 30000\npool_max_idle_per_host = 8\n\n[http_generation]\ntrust_domain = \"local\"\nbuffered_request_max_bytes = 1048576\nstreamed_request_max_bytes = 16777216\nrequest_timeout_ms = 5000\n\n[[workers]]\nworker_id = \"worker-a\"\nbase_url = \"http://127.0.0.1:8000/\"\ntrust_domain = \"local\"\ndefault_model_id = \"omni\"\nhealth_path = \"/health\"\n\n[workers.capacity]\ngeneration_http = 8\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"omni\"]\nmessage_content_forms = [\"string\"]\nmedia_placements = []\ninput_modalities = [\"text\"]\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\"]\n"
+        "schema_version = 1\n\n[server]\nlisten = \"{listen}\"\n\n[shutdown]\ndrain_timeout_ms = {drain_timeout_ms}\n\n[logging]\nformat = \"json\"\nfilter = \"{filter}\"\n\n[router]\nstrategy = \"round_robin\"\n\n[admission]\nglobal = 128\ngeneration_http = 64\n\n[health]\ninterval_ms = 1000\ntimeout_ms = 500\nsuccess_threshold = 2\nfailure_threshold = 3\n\n[http]\nbuffered_request_total_bytes = 8388608\nconnect_timeout_ms = 1000\npool_idle_timeout_ms = 30000\npool_max_idle_per_host = 8\n\n[http_generation]\ntrust_domain = \"local\"\nbuffered_request_max_bytes = 1048576\nstreamed_request_max_bytes = 16777216\nrequest_timeout_ms = 5000\n\n[[workers]]\nworker_id = \"worker-a\"\nbase_url = \"http://127.0.0.1:8000/\"\ntrust_domain = \"local\"\ndefault_model_id = \"omni\"\nhealth_path = \"/health\"\n\n[workers.capacity]\ngeneration_http = 8\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"omni\"]\nmessage_content_forms = [\"string\"]\nmedia_placements = []\ninput_modalities = [\"text\"]\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\"]\n"
     )
 }
 
@@ -195,25 +195,6 @@ fn validates_connection_cap_boundaries() {
         let config = with_max_connections(
             valid_config("127.0.0.1:30000", 30_000, "info"),
             max_connections,
-        );
-        assert!(load_bytes(config.as_bytes()).is_err());
-    }
-}
-
-#[test]
-fn validates_classification_concurrency_boundaries() {
-    for value in [1, 64] {
-        let config = valid_config("127.0.0.1:30000", 30_000, "info").replace(
-            "max_concurrent_classifications = 4",
-            &format!("max_concurrent_classifications = {value}"),
-        );
-        assert!(load_bytes(config.as_bytes()).is_ok());
-    }
-
-    for value in [0, 65] {
-        let config = valid_config("127.0.0.1:30000", 30_000, "info").replace(
-            "max_concurrent_classifications = 4",
-            &format!("max_concurrent_classifications = {value}"),
         );
         assert!(load_bytes(config.as_bytes()).is_err());
     }

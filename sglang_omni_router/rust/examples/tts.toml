@@ -14,7 +14,6 @@ filter = "info"
 
 [router]
 strategy = "round_robin"
-max_concurrent_classifications = 4
 
 [admission]
 global = 64
