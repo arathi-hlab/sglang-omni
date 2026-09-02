@@ -296,10 +296,10 @@ head. It does not limit request bodies, active handlers, responses, streams, or
 upgraded transports. Connection-level accept errors retry immediately; other
 accept errors are logged and retried after one second.
 
-On Unix, startup raises the `RLIMIT_NOFILE` soft limit toward the
-operator-controlled hard limit and verifies the configured listener, accepted
-client sockets, active upstream requests, pooled upstream connections, and
-worker health connections fit within it.
+On Unix, startup attempts to raise the `RLIMIT_NOFILE` soft limit to `65,535`.
+If the process hard limit prevents that, the router logs a warning and continues.
+Set the process file limit for the deployment's configured connection and
+admission concurrency.
 
 The first `SIGINT` or `SIGTERM` closes admission, stops health work, drops the
 listener, and drains owned tasks. A distinct second signal or the drain

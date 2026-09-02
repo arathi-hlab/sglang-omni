@@ -25,8 +25,8 @@ pub use error::{ConfigError, RouterError};
 /// shutdown path.
 pub fn run(config_path: &Path) -> Result<(), RouterError> {
     let config = Config::load(config_path)?;
-    prepare_file_limit(&config)?;
     init_tracing(&config)?;
+    prepare_file_limit();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_name("sgl-omni-router")
         .enable_io()
@@ -38,46 +38,30 @@ pub fn run(config_path: &Path) -> Result<(), RouterError> {
 }
 
 #[cfg(unix)]
-fn prepare_file_limit(config: &Config) -> Result<(), RouterError> {
-    let soft_limit = rlimit::increase_nofile_limit(u64::MAX).map_err(RouterError::FileLimit)?;
-    let minimum = minimum_file_limit(config)?;
-    if soft_limit < minimum {
-        return Err(RouterError::InsufficientFileLimit {
-            required: minimum,
-            soft_limit,
-        });
-    }
-    Ok(())
-}
+fn prepare_file_limit() {
+    const TARGET_NOFILE: u64 = 65_535;
 
-#[cfg(unix)]
-fn minimum_file_limit(config: &Config) -> Result<u64, RouterError> {
-    // Listener + accepted clients + active upstreams + each worker's idle generation pool and
-    // serial health connection.
-    let accepted = u64::try_from(config.server.max_connections)
-        .map_err(|_| RouterError::WorkerPoolInvariant)?;
-    let workers =
-        u64::try_from(config.workers.len()).map_err(|_| RouterError::WorkerPoolInvariant)?;
-    let idle_per_worker = u64::try_from(config.http_generation.pool_max_idle_per_host)
-        .map_err(|_| RouterError::WorkerPoolInvariant)?;
-    let worker_sockets = workers
-        .checked_mul(
-            idle_per_worker
-                .checked_add(1)
-                .ok_or(RouterError::WorkerPoolInvariant)?,
-        )
-        .ok_or(RouterError::WorkerPoolInvariant)?;
-    1_u64
-        .checked_add(accepted)
-        .and_then(|minimum| minimum.checked_add(u64::from(config.admission.global)))
-        .and_then(|minimum| minimum.checked_add(worker_sockets))
-        .ok_or(RouterError::WorkerPoolInvariant)
+    match rlimit::increase_nofile_limit(TARGET_NOFILE) {
+        Ok(soft_limit) if soft_limit < TARGET_NOFILE => {
+            tracing::warn!(
+                soft_limit,
+                target = TARGET_NOFILE,
+                "RLIMIT_NOFILE remains below the recommended target; raise the process limit to support the configured concurrency"
+            );
+        }
+        Ok(_soft_limit) => {}
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                target = TARGET_NOFILE,
+                "failed to raise RLIMIT_NOFILE; raise the process limit to support the configured concurrency"
+            );
+        }
+    }
 }
 
 #[cfg(not(unix))]
-fn prepare_file_limit(_config: &Config) -> Result<(), RouterError> {
-    Ok(())
-}
+fn prepare_file_limit() {}
 
 fn init_tracing(config: &Config) -> Result<(), RouterError> {
     use tracing_subscriber::prelude::*;

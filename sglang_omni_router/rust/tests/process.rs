@@ -86,7 +86,7 @@ impl ChildGuard {
             .arg(env!("CARGO_BIN_EXE_sgl-omni-router"))
             .arg(config)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn router with bounded RLIMIT_NOFILE");
@@ -407,16 +407,35 @@ fn invalid_connection_caps_fail_check_config_with_exit_two() {
 }
 
 #[test]
-fn outbound_socket_budget_is_checked_before_serving() {
+fn low_hard_nofile_limit_warns_and_serves() {
     let _process_guard = process_lock();
     let directory = TestDir::new();
     let address = unused_address();
     let config = directory.config(address, 128, 1_000);
     let mut child = ChildGuard::spawn_with_nofile(&config, 192);
 
-    assert_eq!(child.wait(PROCESS_DEADLINE).code(), Some(1));
-    TcpStream::connect_timeout(&address, Duration::from_millis(100))
-        .expect_err("invalid file limit must fail before the service becomes live");
+    wait_until_live(address, &mut child);
+    signal(child.id(), "-TERM");
+    assert_eq!(child.wait(PROCESS_DEADLINE).code(), Some(0));
+    let mut diagnostics = String::new();
+    child
+        .0
+        .stdout
+        .take()
+        .expect("file-limit log stream remains available")
+        .read_to_string(&mut diagnostics)
+        .expect("read file-limit log");
+    child
+        .0
+        .stderr
+        .take()
+        .expect("file-limit warning stream remains available")
+        .read_to_string(&mut diagnostics)
+        .expect("read file-limit warning");
+    assert!(
+        diagnostics.contains("RLIMIT_NOFILE remains below the recommended target"),
+        "missing file-limit warning: {diagnostics}"
+    );
 }
 
 #[test]
