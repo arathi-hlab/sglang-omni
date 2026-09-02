@@ -188,12 +188,10 @@ worker and returned to the client.
 
 The direct path is available when every eligible replica in a trust-scoped
 cohort has the same concrete default model and compatible profile contract.
-For heterogeneous media pools, the `x-sglang-omni-route-model` and
-`x-sglang-omni-route-stream` hints can select a startup-proven equivalent
-cohort when both are present. Partial or unproven hints do not bypass
-classification. Hints are checked against the body whenever the body is
-classified and are not forwarded upstream. The router relays a direct request
-body as a backpressured stream.
+Heterogeneous pools use the classified path. The optional
+`x-sglang-omni-route-model` and `x-sglang-omni-route-stream` headers are checked
+against the classified body and are not forwarded upstream. The router relays
+a direct request body as a backpressured stream.
 
 Requests that require body-owned routing facts reserve aggregate byte capacity,
 read the body once, and classify the model, content forms, media placement,
@@ -253,13 +251,13 @@ never split; one worker atomically reserves capacity for the complete batch.
 Speech-batch admission and worker capacity count batch items rather than HTTP
 requests. Classified transcription and translation requests buffer the full
 multipart upload, so heterogeneous ASR deployments must size the buffered
-limits for their largest accepted recordings or provide complete route hints.
-Transcription and translation share a capacity class but require separate
-profile tasks.
+limits for their largest accepted recordings. Transcription and translation
+share a capacity class but require separate profile tasks.
 
-The router preserves validated JSON, text, SSE, encoded audio, raw PCM,
-sample-rate and channel metadata, usage, completion-token, and finish-reason
-contracts. It does not decode, transcode, or regenerate audio.
+The router preserves the trusted worker's response content type together with
+JSON, text, SSE, encoded audio, raw PCM, sample-rate and channel metadata,
+usage, completion-token, and finish-reason contracts. It does not decode,
+transcode, or regenerate audio.
 
 Speech and realtime WebSockets terminate both handshakes and pin one worker for
 the complete session. Each frame awaits its destination send, preserving frame
