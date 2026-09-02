@@ -78,18 +78,6 @@ pub(crate) fn sanitize_response(
     {
         return Err(HttpFault::UpstreamProtocolError);
     }
-    if status.is_success() {
-        let value = content_type
-            .filter(|_| !connection_tokens.contains(CONTENT_TYPE.as_str()))
-            .and_then(|value| value.to_str().ok())
-            .ok_or(HttpFault::UpstreamProtocolError)?;
-        let json = is_media_type(value, "application/json");
-        let sse = is_media_type(value, "text/event-stream");
-        if !json && !sse {
-            return Err(HttpFault::UpstreamProtocolError);
-        }
-    }
-
     let mut result = HeaderMap::new();
     for (name, value) in source {
         if strip_response_header(name, &connection_tokens) || (chunked && name == CONTENT_LENGTH) {
@@ -467,12 +455,14 @@ mod tests {
     }
 
     #[test]
-    fn response_accepts_valid_success_media_and_rejects_invalid_metadata() {
+    fn response_preserves_valid_media_types_and_rejects_invalid_metadata() {
         let mut plain = HeaderMap::new();
         plain.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
         assert_eq!(
-            sanitize_response(StatusCode::OK, &plain).err(),
-            Some(HttpFault::UpstreamProtocolError)
+            sanitize_response(StatusCode::OK, &plain)
+                .expect("valid worker media type")
+                .get(CONTENT_TYPE),
+            plain.get(CONTENT_TYPE)
         );
         assert_eq!(
             sanitize_response(StatusCode::TEMPORARY_REDIRECT, &HeaderMap::new()).err(),
@@ -530,15 +520,5 @@ mod tests {
         let sanitized = sanitize_response(StatusCode::UNPROCESSABLE_ENTITY, &headers)
             .expect("worker error response is relayable");
         assert!(sanitized.is_empty());
-    }
-
-    #[test]
-    fn successful_json_and_sse_responses_are_relayable() {
-        let mut json = HeaderMap::new();
-        json.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let mut sse = HeaderMap::new();
-        sse.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
-        assert!(sanitize_response(StatusCode::OK, &json).is_ok());
-        assert!(sanitize_response(StatusCode::OK, &sse).is_ok());
     }
 }
