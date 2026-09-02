@@ -225,18 +225,12 @@ def make_fun_asr_scheduler_adapters(
         else:
             hotwords = list(hotwords_raw)
         if not hotwords:
-            # The transcription endpoint carries vocabulary hints in the
-            # OpenAI-compatible ``prompt`` field; nothing emits ``hotwords``
-            # over HTTP. Read the prompt as a comma-separated hotword list so
-            # biasing is reachable through the documented parameter. The join
-            # in _build_prompt_text reassembles it with ", ", so a plain
-            # comma-separated hint round-trips unchanged.
+            # Note(Audrey): the endpoint sends vocabulary hints as ``prompt``;
+            # comma-splitting round-trips through the ", " join below.
             prompt_hint = params.get("prompt")
             if prompt_hint:
                 hotwords = [
-                    term.strip()
-                    for term in str(prompt_hint).split(",")
-                    if term.strip()
+                    term.strip() for term in str(prompt_hint).split(",") if term.strip()
                 ]
         prompt_text = _build_prompt_text(language, itn, hotwords)
         input_ids = _build_prompt_ids(num_audio_tokens, prompt_text)
