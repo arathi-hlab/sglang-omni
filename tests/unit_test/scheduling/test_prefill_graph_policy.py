@@ -288,37 +288,43 @@ def test_breakable_prefill_cap_is_not_clamped_before_server_args() -> None:
     assert "cuda_graph_bs_prefill" not in overrides
 
 
-def test_nested_prefill_max_bs_below_a_stage_default_ladder_warns(caplog) -> None:
+@pytest.mark.parametrize(("cap", "expected_top"), [(128, 128), (100, 100)])
+def test_nested_prefill_max_bs_trims_a_stage_default_ladder(
+    cap: int, expected_top: int
+) -> None:
     overrides = build_generation_batch_overrides(
         max_running_requests=4,
         cuda_graph_bs_prefill=build_default_prefill_cuda_graph_bs(512),
-        server_args_overrides={"cuda_graph_config": {"prefill": {"max_bs": 128}}},
-    )
-    server_args = _server_args(
-        prefill_backend="breakable",
-        prefill_bs=overrides["cuda_graph_bs_prefill"],
-        prefill_max_bs=overrides["cuda_graph_max_bs_prefill"],
+        server_args_overrides={"cuda_graph_config": {"prefill": {"max_bs": cap}}},
     )
 
-    with caplog.at_level(logging.WARNING):
-        _validate(server_args)
-
-    assert max(server_args.cuda_graph_config.prefill.bs) == 512
-    assert server_args.cuda_graph_config.prefill.max_bs == 128
-    assert "max=512 exceeds the per-forward token budget 128" in caplog.text
+    assert overrides["cuda_graph_max_bs_prefill"] == cap
+    assert overrides["cuda_graph_bs_prefill"][-1] == expected_top
+    assert all(bucket <= cap for bucket in overrides["cuda_graph_bs_prefill"])
 
 
-def test_operator_prefill_buckets_are_never_trimmed_by_a_nested_cap() -> None:
+def test_operator_prefill_cap_below_its_own_list_is_rejected() -> None:
+    with pytest.raises(ValueError, match="below the declared cuda_graph_bs_prefill"):
+        build_generation_batch_overrides(
+            max_running_requests=4,
+            server_args_overrides={
+                "cuda_graph_bs_prefill": [128, 256],
+                "cuda_graph_config": {"prefill": {"max_bs": 128}},
+            },
+        )
+
+
+def test_operator_prefill_cap_above_its_list_is_kept() -> None:
     overrides = build_generation_batch_overrides(
         max_running_requests=4,
         server_args_overrides={
             "cuda_graph_bs_prefill": [128, 256],
-            "cuda_graph_config": {"prefill": {"max_bs": 128}},
+            "cuda_graph_max_bs_prefill": 512,
         },
     )
 
     assert overrides["cuda_graph_bs_prefill"] == [128, 256]
-    assert overrides["cuda_graph_max_bs_prefill"] == 128
+    assert overrides["cuda_graph_max_bs_prefill"] == 512
 
 
 def test_nested_disabled_backend_overrides_a_stage_default() -> None:

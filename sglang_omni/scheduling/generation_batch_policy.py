@@ -158,6 +158,21 @@ def build_generation_batch_overrides(
     prefill_max_bs = overrides.get("cuda_graph_max_bs_prefill")
     if prefill_bs and prefill_max_bs is None:
         overrides["cuda_graph_max_bs_prefill"] = max(int(b) for b in prefill_bs)
+    elif prefill_bs and int(prefill_max_bs) < max(int(b) for b in prefill_bs):
+        # note (ratish): SGLang keeps a declared list as is and the runner
+        # captures up to its top, so an operator cap only bounds a stage list
+        # if it is applied here. An operator list with an operator cap below
+        # its top is a contradiction only the operator can resolve.
+        cap = int(prefill_max_bs)
+        if "cuda_graph_bs_prefill" in incoming:
+            raise ValueError(
+                f"cuda_graph_max_bs_prefill={cap} is below the declared "
+                f"cuda_graph_bs_prefill top {max(int(b) for b in prefill_bs)}"
+            )
+        trimmed = [int(b) for b in prefill_bs if int(b) <= cap]
+        if not trimmed or trimmed[-1] != cap:
+            trimmed.append(cap)
+        overrides["cuda_graph_bs_prefill"] = trimmed
 
     return overrides
 
