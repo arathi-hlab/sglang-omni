@@ -149,7 +149,13 @@ def test_breakable_rejects_max_bs_mismatch() -> None:
 
 
 def test_breakable_rejects_buckets_above_chunked_prefill() -> None:
-    with pytest.raises(ValueError, match="chunked_prefill_size are unreachable"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "cuda_graph_bs_prefill max=12288 exceeds resolved "
+            "chunked_prefill_size=8192"
+        ),
+    ):
         _validate(
             _server_args(
                 prefill_backend="breakable",
@@ -161,7 +167,13 @@ def test_breakable_rejects_buckets_above_chunked_prefill() -> None:
 
 
 def test_breakable_rejects_buckets_above_max_prefill_tokens() -> None:
-    with pytest.raises(ValueError, match="max_prefill_tokens are unreachable"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "cuda_graph_bs_prefill max=32768 exceeds resolved "
+            "max_prefill_tokens=16384"
+        ),
+    ):
         _validate(
             _server_args(
                 prefill_backend="breakable",
@@ -521,7 +533,7 @@ def test_builder_wires_payload_slot_and_attestation(monkeypatch, caplog) -> None
         def make_scheduler(self, **kwargs: Any) -> Any:
             return SimpleNamespace(outbox=None, kwargs=kwargs)
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         PolicyBuilder().build(
             "model",
             server_args_overrides={
@@ -534,9 +546,11 @@ def test_builder_wires_payload_slot_and_attestation(monkeypatch, caplog) -> None
     assert backend_locks_seen[-1] is True
     assert len(attest_calls) == 1
     assert (
-        "Prefill CUDA graph buckets were explicitly configured while "
-        "chunked_prefill_size is auto-resolved" in caplog.text
+        "chunked_prefill_size: auto -> 8192, "
+        "source=SGLang hardware resolution" in caplog.text
     )
+    assert "chunked_prefill_size is auto-resolved" not in caplog.text
+    assert "prefill_cuda_graph_max_bs:" not in caplog.text
 
     caplog.clear()
     PolicyBuilder().build("model")

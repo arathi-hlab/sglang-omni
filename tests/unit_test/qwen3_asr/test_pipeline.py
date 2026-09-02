@@ -635,7 +635,9 @@ def test_qwen3_asr_build_initializes_and_attests_prefill_graphs(monkeypatch) -> 
     assert len(recorded.attest_calls) == 1
 
 
-def test_qwen3_asr_auto_chunk_resolves_before_prefill_buckets(monkeypatch) -> None:
+def test_qwen3_asr_auto_chunk_resolves_before_prefill_buckets(
+    monkeypatch, caplog
+) -> None:
     recorded = _patch_engine_dependencies(monkeypatch, want_cuda_graph=True)
     build_resolved_server_args = _fake_server_args_builder(recorded.build_kwargs)
 
@@ -660,16 +662,25 @@ def test_qwen3_asr_auto_chunk_resolves_before_prefill_buckets(monkeypatch) -> No
         _resolve_like_sub_35_gib_gpu,
     )
 
-    scheduler = qwen3_asr_stages.create_sglang_qwen3_asr_executor(
-        "dummy",
-        server_args_overrides={"chunked_prefill_size": None},
-    )
+    with caplog.at_level(logging.INFO):
+        scheduler = qwen3_asr_stages.create_sglang_qwen3_asr_executor(
+            "dummy",
+            server_args_overrides={"chunked_prefill_size": None},
+        )
 
     _, attested = recorded.attest_calls[-1]
     assert scheduler is not None
     assert attested.chunked_prefill_size == 2048
     assert max(attested.cuda_graph_config.prefill.bs) == 2048
     assert 4096 not in attested.cuda_graph_config.prefill.bs
+    assert (
+        "chunked_prefill_size: auto -> 2048, "
+        "source=SGLang hardware resolution" in caplog.text
+    )
+    assert (
+        "prefill_cuda_graph_max_bs: auto -> 2048, "
+        "derived_from=chunked_prefill_size" in caplog.text
+    )
 
 
 @pytest.mark.parametrize(

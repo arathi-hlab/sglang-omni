@@ -87,19 +87,27 @@ def finalize_prefill_cuda_graph_buckets(
         return
 
     caps = [
-        getattr(server_args, "max_prefill_tokens", None),
-        getattr(server_args, "max_total_tokens", None),
-        getattr(server_args, "context_length", None),
+        ("chunked_prefill_size", getattr(server_args, "chunked_prefill_size", None)),
+        ("max_prefill_tokens", getattr(server_args, "max_prefill_tokens", None)),
+        ("max_total_tokens", getattr(server_args, "max_total_tokens", None)),
+        ("context_length", getattr(server_args, "context_length", None)),
     ]
     prefill_max_bs = prefill_config.max_bs
     if prefill_max_bs is not None and int(prefill_max_bs) > 0:
-        caps.append(prefill_max_bs)
-    chunked_prefill_size = getattr(server_args, "chunked_prefill_size", None)
-    if chunked_prefill_size is not None and int(chunked_prefill_size) > 0:
-        caps.append(chunked_prefill_size)
+        caps.append(("cuda_graph_max_bs_prefill", prefill_max_bs))
 
-    cap = min(int(value) for value in caps if value is not None)
+    resolved_caps = [
+        (name, int(value))
+        for name, value in caps
+        if value is not None and (name != "chunked_prefill_size" or int(value) > 0)
+    ]
+    cap_name, cap = min(resolved_caps, key=lambda item: item[1])
     locked = server_args._cuda_graph_config_locked
+    previous_cap: int | str = (
+        int(prefill_max_bs)
+        if ("prefill", "max_bs") in locked and prefill_max_bs is not None
+        else "auto"
+    )
     if ("prefill", "bs") in locked and prefill_config.bs:
         buckets = [int(bucket) for bucket in prefill_config.bs if int(bucket) <= cap]
         if not buckets or buckets[-1] != cap:
@@ -116,6 +124,12 @@ def finalize_prefill_cuda_graph_buckets(
         cuda_graph_config=cuda_graph_config,
     )
     locked.update({("prefill", "bs"), ("prefill", "max_bs")})
+    logger.info(
+        "prefill_cuda_graph_max_bs: %s -> %d, derived_from=%s",
+        previous_cap,
+        cap,
+        cap_name,
+    )
 
 
 def nested_prefill_overrides(overrides: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -356,8 +370,8 @@ def _validate_prefill_graph_policy(
             and max(buckets) > int(cap_value)
         ):
             errors.append(
-                f"cuda_graph_bs_prefill buckets above {cap_name} are "
-                f"unreachable ({max(buckets)} > {cap_value})"
+                f"cuda_graph_bs_prefill max={max(buckets)} exceeds resolved "
+                f"{cap_name}={cap_value}"
             )
 
     # The largest eager-falling length under bucket nxt is

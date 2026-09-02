@@ -139,15 +139,7 @@ class SGLangGenerationEngineBuilder(ABC):
             **self.generation_defaults(dtype=dtype),
         )
         self.adjust_overrides(overrides)
-        if (
-            operator_selected_prefill_buckets
-            and overrides.get("chunked_prefill_size") is None
-        ):
-            logger.warning(
-                "Prefill CUDA graph buckets were explicitly configured while "
-                "chunked_prefill_size is auto-resolved; compatibility will be "
-                "validated after runtime resolution."
-            )
+        chunked_prefill_size_is_auto = overrides.get("chunked_prefill_size") is None
         if "context_length" in overrides:
             if not self.supports_context_length_override:
                 raise ValueError(
@@ -183,6 +175,14 @@ class SGLangGenerationEngineBuilder(ABC):
             context_length=self.context_length,
             **overrides,
         )
+        if (
+            chunked_prefill_size_is_auto
+            and get_prefill_cuda_graph_backend(server_args) != CudaGraphBackend.DISABLED
+        ):
+            logger.info(
+                "chunked_prefill_size: auto -> %s, source=SGLang hardware resolution",
+                server_args.chunked_prefill_size,
+            )
         finalize_prefill_cuda_graph_buckets(
             server_args,
             operator_selected_buckets=operator_selected_prefill_buckets,
