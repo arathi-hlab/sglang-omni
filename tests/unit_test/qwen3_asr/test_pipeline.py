@@ -646,7 +646,7 @@ def test_qwen3_asr_auto_chunked_prefill_uses_the_sglang_ladder(
         ),
     )
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         scheduler = qwen3_asr_stages.create_sglang_qwen3_asr_executor(
             "dummy",
             server_args_overrides={"chunked_prefill_size": None},
@@ -662,6 +662,11 @@ def test_qwen3_asr_auto_chunked_prefill_uses_the_sglang_ladder(
         build_default_prefill_cuda_graph_bs(resolved_chunked_prefill_size)
     )
     assert attested.cuda_graph_config.prefill.max_bs == resolved_chunked_prefill_size
+    assert (
+        "Qwen3-ASR: chunked_prefill_size was unset, SGLang resolved "
+        f"{resolved_chunked_prefill_size}, prefill CUDA graph cap "
+        f"{resolved_chunked_prefill_size}"
+    ) in caplog.text
     assert (
         "exceeds the per-forward token budget 4096" in caplog.text
     ) is exceeds_max_prefill_tokens
