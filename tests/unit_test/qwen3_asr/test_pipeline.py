@@ -607,7 +607,7 @@ def test_qwen3_asr_prefill_ladder_is_accepted_by_the_shared_policy(caplog) -> No
         **builder.generation_defaults(dtype="bfloat16")
     )
     builder.adjust_overrides(overrides)
-    assert "cuda_graph_bs_prefill" not in overrides
+    assert overrides["cuda_graph_bs_prefill"] == _sglang_prefill_ladder(4096)
     server_args = _fake_server_args_builder({})("dummy", 1636, **overrides)
 
     with caplog.at_level(logging.WARNING):
@@ -726,7 +726,7 @@ def test_qwen3_asr_ladder_respects_deployment_cap_overrides(
     assert all(
         recorded.build_kwargs[key] == value for key, value in cap_override.items()
     )
-    assert "cuda_graph_bs_prefill" not in recorded.build_kwargs
+    assert recorded.build_kwargs["cuda_graph_bs_prefill"][-1] == expected_cap
     assert max(attested.cuda_graph_config.prefill.bs) == expected_cap
     assert attested.cuda_graph_config.prefill.max_bs == expected_cap
 

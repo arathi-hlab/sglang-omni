@@ -334,7 +334,7 @@ def test_nested_prefill_max_bs_composes_as_a_flat_cap() -> None:
     assert "cuda_graph_bs_prefill" not in overrides
 
 
-def test_breakable_prefill_cap_leaves_the_ladder_to_sglang() -> None:
+def test_breakable_prefill_cap_builds_the_shared_default_ladder() -> None:
     overrides = build_generation_batch_overrides(
         max_running_requests=4,
         server_args_overrides={
@@ -344,10 +344,12 @@ def test_breakable_prefill_cap_leaves_the_ladder_to_sglang() -> None:
     )
 
     assert overrides["cuda_graph_max_bs_prefill"] == 512
-    assert "cuda_graph_bs_prefill" not in overrides
+    assert overrides["cuda_graph_bs_prefill"] == build_default_prefill_cuda_graph_bs(
+        512
+    )
 
 
-def test_breakable_prefill_cap_is_not_clamped_before_server_args() -> None:
+def test_prefill_cap_is_not_clamped_by_max_prefill_tokens() -> None:
     overrides = build_generation_batch_overrides(
         max_running_requests=4,
         server_args_overrides={
@@ -358,6 +360,59 @@ def test_breakable_prefill_cap_is_not_clamped_before_server_args() -> None:
     )
 
     assert overrides["cuda_graph_max_bs_prefill"] == 2048
+    assert overrides["cuda_graph_bs_prefill"][-1] == 2048
+
+
+@pytest.mark.parametrize(
+    ("server_args_overrides", "expected_cap"),
+    [
+        ({"chunked_prefill_size": 4096}, 4096),
+        ({"chunked_prefill_size": 4592}, 4592),
+        ({"chunked_prefill_size": 4096, "max_total_tokens": 1000}, 1000),
+        ({"chunked_prefill_size": 4096, "max_total_tokens": 8192}, 4096),
+        ({"cuda_graph_max_bs_prefill": 3000, "max_total_tokens": 1000}, 3000),
+    ],
+)
+def test_explicit_prefill_caps_build_the_ladder_before_server_args(
+    server_args_overrides: dict[str, Any], expected_cap: int
+) -> None:
+    overrides = build_generation_batch_overrides(
+        max_running_requests=4,
+        server_args_overrides={
+            "cuda_graph_backend_prefill": "breakable",
+            **server_args_overrides,
+        },
+    )
+
+    assert overrides["cuda_graph_max_bs_prefill"] == expected_cap
+    assert overrides["cuda_graph_bs_prefill"] == (
+        build_default_prefill_cuda_graph_bs(expected_cap)
+    )
+
+
+@pytest.mark.parametrize(
+    "server_args_overrides",
+    [
+        {},
+        {"chunked_prefill_size": None},
+        {"chunked_prefill_size": None, "max_total_tokens": 3000},
+        {"chunked_prefill_size": 0},
+        {"chunked_prefill_size": -1},
+        {"cuda_graph_max_bs_prefill": 0},
+        {"cuda_graph_backend_prefill": "disabled", "chunked_prefill_size": 4096},
+    ],
+)
+def test_unset_or_disabled_prefill_caps_leave_the_ladder_to_sglang(
+    server_args_overrides: dict[str, Any],
+) -> None:
+    overrides = build_generation_batch_overrides(
+        max_running_requests=4,
+        server_args_overrides={
+            "cuda_graph_backend_prefill": "breakable",
+            **server_args_overrides,
+        },
+    )
+
     assert "cuda_graph_bs_prefill" not in overrides
 
 

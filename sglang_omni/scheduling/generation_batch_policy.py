@@ -70,6 +70,23 @@ def build_default_prefill_cuda_graph_bs(max_num_tokens: int) -> list[int]:
     return values
 
 
+def _explicit_prefill_cap(overrides: Mapping[str, Any]) -> int | None:
+    """The prefill graph cap SGLang settles on when its inputs are already
+    explicit: a declared positive cap, else a positive explicit chunk bounded
+    by max_total_tokens. None when the chunk is unset or non-positive."""
+    declared = overrides.get("cuda_graph_max_bs_prefill")
+    if declared is not None:
+        return int(declared) if int(declared) > 0 else None
+    chunk = overrides.get("chunked_prefill_size")
+    if chunk is None or int(chunk) <= 0:
+        return None
+    cap = int(chunk)
+    max_total_tokens = overrides.get("max_total_tokens")
+    if max_total_tokens is not None:
+        cap = min(cap, int(max_total_tokens))
+    return cap
+
+
 def nested_prefill_overrides(overrides: Mapping[str, Any]) -> Mapping[str, Any]:
     """Extract the prefill section of a nested cuda_graph_config override."""
     config = overrides.get("cuda_graph_config")
@@ -150,12 +167,24 @@ def build_generation_batch_overrides(
         overrides.pop("cuda_graph_bs_prefill", None)
         overrides.pop("cuda_graph_max_bs_prefill", None)
 
-    # note (Akazaakane): SGLang derives the default prefill ladder from the
-    # resolved chunked_prefill_size inside ServerArgs, but sets the prefill
-    # max_bs from the chunk even when a list is declared, so a declared list's
-    # cap is filled in here.
     prefill_bs = overrides.get("cuda_graph_bs_prefill")
     prefill_max_bs = overrides.get("cuda_graph_max_bs_prefill")
+    if (
+        prefill_bs is None
+        and overrides.get("cuda_graph_backend_prefill") == CudaGraphBackend.BREAKABLE
+    ):
+        # note (ratish): SGLang's prefill generator omits an off-grid cap, so
+        # when the cap is already explicit the ladder is handed over here and
+        # SGLang plans with the final buckets. An unset chunk is resolved from
+        # GPU memory inside ServerArgs, so that case is left to SGLang.
+        cap = _explicit_prefill_cap(overrides)
+        if cap is not None:
+            prefill_bs = build_default_prefill_cuda_graph_bs(cap)
+            prefill_max_bs = cap
+            overrides["cuda_graph_bs_prefill"] = prefill_bs
+            overrides["cuda_graph_max_bs_prefill"] = cap
+    # note (Akazaakane): SGLang sets the prefill max_bs from the chunk even
+    # when a list is declared, so a declared list's cap is filled in here.
     if prefill_bs and prefill_max_bs is None:
         overrides["cuda_graph_max_bs_prefill"] = max(int(b) for b in prefill_bs)
     elif prefill_bs and int(prefill_max_bs) < max(int(b) for b in prefill_bs):
