@@ -105,7 +105,16 @@ pub(crate) struct WorkerConfig {
     pub(crate) default_model_id: Option<String>,
     #[serde(default = "default_health_path")]
     pub(crate) health_path: String,
+    #[serde(default)]
+    pub(crate) capacity: WorkerCapacityConfig,
     pub(crate) service_profiles: Vec<ServiceProfile>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkerCapacityConfig {
+    pub(crate) speech_websocket: Option<u32>,
+    pub(crate) realtime_websocket: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
@@ -966,6 +975,20 @@ pub(crate) fn validate_workers(workers: &[WorkerConfig]) -> Result<(), ConfigErr
                 "worker origins must be unique",
             ));
         }
+        for (field, value) in [
+            (
+                "workers.capacity.speech_websocket",
+                worker.capacity.speech_websocket,
+            ),
+            (
+                "workers.capacity.realtime_websocket",
+                worker.capacity.realtime_websocket,
+            ),
+        ] {
+            if value.is_some_and(|limit| limit == 0 || limit > 65_535) {
+                return Err(ConfigError::invalid(field, "must be between 1 and 65535"));
+            }
+        }
         if worker.service_profiles.is_empty()
             || worker.service_profiles.len() > MAX_PROFILES_PER_WORKER
         {
@@ -998,6 +1021,22 @@ pub(crate) fn validate_workers(workers: &[WorkerConfig]) -> Result<(), ConfigErr
                 "workers.default_model_id",
                 "is required for realtime WebSocket workers",
             ));
+        }
+        for profile in &worker.service_profiles {
+            let configured = match profile.service_class() {
+                ServiceClass::SpeechWebsocket => worker.capacity.speech_websocket,
+                ServiceClass::RealtimeWebsocket => worker.capacity.realtime_websocket,
+                ServiceClass::GenerationHttp
+                | ServiceClass::SpeechHttp
+                | ServiceClass::SpeechBatch
+                | ServiceClass::TranscriptionHttp => continue,
+            };
+            if configured.is_none() {
+                return Err(ConfigError::invalid(
+                    "workers.capacity",
+                    "must configure capacity for every WebSocket service profile",
+                ));
+            }
         }
         if let Some(default) = worker.default_model_id.as_deref() {
             for advertised in &worker.service_profiles {
@@ -1122,6 +1161,7 @@ mod tests {
             trust_domain: String::from("local"),
             default_model_id: Some(String::from("omni")),
             health_path: String::from("/health"),
+            capacity: WorkerCapacityConfig::default(),
             service_profiles: vec![profile("omni")],
         }
     }
@@ -1310,6 +1350,7 @@ mod tests {
             trust_domain: String::from("local"),
             default_model_id: None,
             health_path: String::from("/health"),
+            capacity: WorkerCapacityConfig::default(),
             service_profiles: vec![profile(SpeechToTextTask::Transcribe)],
         };
         assert!(validate_workers(&[worker]).is_ok());
