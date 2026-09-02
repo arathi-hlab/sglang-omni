@@ -53,18 +53,9 @@ def _apply_platform_decode_cuda_graph_backend(kwargs: dict[str, Any]) -> None:
 
 def fill_prefill_terminal_bucket(server_args: ServerArgs) -> None:
     """Append the resolved prefill graph cap to a SGLang-derived bucket list
-    whose top falls below it.
-
-    SGLang's decode generator appends an off-grid max_bs, its prefill
-    generator does not, and the prefill runner replays nothing above the top
-    captured bucket. A declared list is left as declared. The fill runs after
-    ServerArgs derived mem_fraction_static, so the appended bucket sits outside
-    that heuristic's per-bucket graph reserve (8 MB), and the env-gated
-    post-capture KV sizing re-reads the final list at runtime.
-    """
-    # note (ratish): SGLang skips its resolution pipeline for the dummy model
-    # path and leaves cuda_graph_config unset, the same state its own
-    # _validate_cuda_graph_config checks for.
+    whose top falls below it. SGLang's decode generator appends an off-grid
+    max_bs, its prefill generator does not, and the runner replays nothing
+    above the top captured bucket."""
     if server_args.cuda_graph_config is None:
         return
     prefill = server_args.cuda_graph_config.prefill

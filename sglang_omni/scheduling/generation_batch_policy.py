@@ -159,10 +159,9 @@ def build_generation_batch_overrides(
     if prefill_bs and prefill_max_bs is None:
         overrides["cuda_graph_max_bs_prefill"] = max(int(b) for b in prefill_bs)
     elif prefill_bs and int(prefill_max_bs) < max(int(b) for b in prefill_bs):
-        # note (ratish): SGLang keeps a declared list as is and the runner
-        # captures up to its top, so an operator cap only bounds a stage list
-        # if it is applied here. An operator list with an operator cap below
-        # its top is a contradiction only the operator can resolve.
+        # note (ratish): SGLang keeps a declared list as is, so an operator cap
+        # bounds a stage list only here. An operator cap below the operator's
+        # own list is a contradiction.
         cap = int(prefill_max_bs)
         if "cuda_graph_bs_prefill" in incoming:
             raise ValueError(
@@ -307,12 +306,9 @@ def _validate_prefill_graph_policy(
     if buckets is None:
         return
 
-    # note (ratish): with chunked prefill on, PrefillAdder bounds every
-    # admission by the remaining chunk, so one prefill forward never carries
-    # more than chunked_prefill_size tokens and buckets above it are never
-    # scheduled. max_prefill_tokens is a cumulative stop that a single
-    # admission can overshoot, and without chunking the first request is
-    # admitted at any length, so neither one is a per-forward ceiling.
+    # note (ratish): PrefillAdder bounds each admission by the remaining chunk,
+    # so a positive chunked_prefill_size is the only per-forward ceiling.
+    # max_prefill_tokens is a cumulative stop one admission can overshoot.
     chunk = server_args.chunked_prefill_size
     if chunk is not None and int(chunk) > 0 and buckets[-1] > int(chunk):
         logger.warning(
