@@ -613,6 +613,33 @@ def test_non_streaming_http_faults_return_500(model_name: str) -> None:
     assert "cuda out of memory" in speech_resp.json()["error"]["message"]
 
 
+def test_chat_nonstring_text_part_maps_to_400() -> None:
+    error = "Message 0 text part must have a string text field"
+    client = TestClient(
+        create_app(
+            Client(FaultInjectingCoordinator("decode", error=error)),
+            model_name="nvidia/Cosmos3-Nano",
+        )
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "nvidia/Cosmos3-Nano",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": 7}],
+                }
+            ],
+            "stream": False,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == error
+
+
 def test_speech_stream_admission_reject_returns_503_without_traceback(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

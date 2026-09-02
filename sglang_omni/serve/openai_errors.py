@@ -18,6 +18,7 @@ _BAD_REQUEST_MARKERS = (
     "multimodal_train_inputs",
     "disallowed special token",
     "does not support media inputs yet",
+    "text part must have a string text field",
 )
 _BAD_REQUEST_PATTERNS = (
     re.compile(r"^Request\s+\S+\s+exceeds the maximum number of tokens:"),
