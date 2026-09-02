@@ -193,8 +193,9 @@ body as a backpressured stream.
 Requests that require body-owned routing facts reserve aggregate byte capacity,
 read the body once, and classify the model, content forms, media placement,
 input and output modalities, response format, and stream mode. Classification
-runs under one shared concurrency limit. The original bytes are forwarded
-without reconstructing JSON or multipart content.
+runs on Tokio's blocking pool, while the aggregate buffered-byte budget bounds
+concurrent classifier memory. The original bytes are forwarded without
+reconstructing JSON or multipart content.
 
 The direct path is bounded by `streamed_request_max_bytes`. The classified path
 is bounded by `buffered_request_max_bytes` per request and
