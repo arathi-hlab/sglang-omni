@@ -119,11 +119,18 @@ conditions flush any buffered text before the final transcript event.
 | `file` | file | required | Audio file uploaded as multipart form data |
 | `model` | string | server default | Model identifier |
 | `language` | string | none | Optional language hint as a supported code or canonical name (case-insensitive); omit it for automatic detection |
-| `prompt` | string | none | Vocabulary biasing: terms likely to appear in the audio (e.g. names, jargon). Raises the model's preference for the supplied terms; it does not force them. A short, relevant list works best — accuracy peaks around 20 terms, and the text is prefilled with every request, so longer lists add latency |
+| `prompt` | string | none | Vocabulary biasing: terms likely to appear in the audio, such as names and jargon. See the note below the table |
 | `response_format` | string | `json` | `json`, `verbose_json`, or `text` |
 | `temperature` | float | `0` | Sampling temperature; `0` uses greedy decoding |
 | `max_new_tokens` | integer | server stage limit | Per-request generation-token limit |
 | `stream` | boolean | `false` | Return SSE transcript deltas; supports `json` or `text` response format |
+
+Biasing raises the model's preference for the supplied terms. It does not
+force them: a term the audio does not contain will not be inserted, and an
+irrelevant list pushes the preference the wrong way and hurts accuracy. Keep
+the list short and relevant. In our measurements accuracy peaked around 20
+terms, and because the text is prefilled with every request, longer lists make
+every request slower.
 
 `verbose_json` uses the model adapter's verbose response schema and includes
 duration-based usage (rounded-up audio seconds) when duration probing succeeds.
