@@ -67,13 +67,10 @@ async fn handle_bodyless(
     validate_common(&request)?;
     validate_bodyless_request(request.headers())?;
     let deadline = tokio::time::Instant::now() + media.request_timeout;
-    let envelope = media
-        .pool
-        .try_admit_envelope()
-        .map_err(map_admission)?;
+    let envelope = media.pool.try_admit_envelope().map_err(map_admission)?;
     let lease = media
         .pool
-        .dispatch_voice_control(envelope)
+        .dispatch_voice_owner(envelope)
         .map_err(map_dispatch)?;
     send_once(
         media,
@@ -102,10 +99,7 @@ async fn handle_upload(
         return Err(HttpFault::RequestBodyTooLarge);
     }
     let deadline = tokio::time::Instant::now() + media.request_timeout;
-    let envelope = media
-        .pool
-        .try_admit_envelope()
-        .map_err(map_admission)?;
+    let envelope = media.pool.try_admit_envelope().map_err(map_admission)?;
     let query = request.uri().query().map(str::to_owned);
     let upload = media
         .relay
@@ -118,7 +112,7 @@ async fn handle_upload(
         .await?;
     let lease = media
         .pool
-        .dispatch_voice_control(envelope)
+        .dispatch_voice_owner(envelope)
         .map_err(map_dispatch)?;
     send_once(
         media,
@@ -169,7 +163,7 @@ async fn send_once(
         OutgoingRequest::control(method, path, query.map(str::to_owned), content_type, upload)?;
     Arc::clone(&media.relay)
         .send(outgoing, lease, request_id, deadline, |status, headers| {
-            sanitize_response(status, headers, false)
+            sanitize_response(status, headers)
         })
         .await
 }
