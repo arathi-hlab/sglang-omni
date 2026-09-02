@@ -15,7 +15,7 @@ use crate::request_id::CanonicalRequestId;
 use crate::worker_pool::{CapacityClass, TrustDomain, WorkerPool};
 
 use classify::Classified;
-use headers::{RequestKind, SuccessProfile};
+use headers::RequestKind;
 
 const SPEECH_PATH: &str = "/v1/audio/speech";
 const BATCH_PATH: &str = "/v1/audio/speech/batch";
@@ -54,14 +54,6 @@ impl HttpMediaRoute {
         match self {
             Self::Speech | Self::SpeechBatch => RequestKind::Json,
             Self::Transcription | Self::Translation => RequestKind::Multipart,
-        }
-    }
-
-    const fn success_profile(self) -> SuccessProfile {
-        match self {
-            Self::Speech => SuccessProfile::Speech,
-            Self::SpeechBatch => SuccessProfile::SpeechBatch,
-            Self::Transcription | Self::Translation => SuccessProfile::Transcription,
         }
     }
 }
@@ -210,7 +202,7 @@ async fn handle(
         );
         return Arc::clone(&media.relay)
             .send(outgoing, lease, request_id, deadline, |status, headers| {
-                headers::sanitize_response(status, headers, route.success_profile())
+                headers::sanitize_response(status, headers)
             })
             .await;
     }
@@ -269,7 +261,7 @@ async fn handle(
     let outgoing = OutgoingRequest::buffered(route.path(), content_type, upload)?;
     Arc::clone(&media.relay)
         .send(outgoing, lease, request_id, deadline, |status, headers| {
-            headers::sanitize_response(status, headers, route.success_profile())
+            headers::sanitize_response(status, headers)
         })
         .await
 }

@@ -213,13 +213,12 @@ mod tests {
     }
 
     #[test]
-    fn response_rejects_redirects_and_invalid_success_media() {
+    fn response_preserves_worker_media_type_and_rejects_invalid_framing() {
         let mut plain = HeaderMap::new();
         plain.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
-        assert_eq!(
-            sanitize_response(StatusCode::OK, &plain).err(),
-            Some(HttpFault::UpstreamProtocolError)
-        );
+        let sanitized = sanitize_response(StatusCode::OK, &plain)
+            .expect("worker-owned response type is relayable");
+        assert_eq!(sanitized.get(CONTENT_TYPE), plain.get(CONTENT_TYPE));
         assert_eq!(
             sanitize_response(StatusCode::TEMPORARY_REDIRECT, &HeaderMap::new()).err(),
             Some(HttpFault::UpstreamProtocolError)
