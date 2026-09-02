@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sglang.srt.server_args import ServerArgs
 
 import sglang_omni.model_runner.base as model_runner_base
 import sglang_omni.models.qwen3_asr.engine_builder as qwen3_asr_builder
@@ -24,9 +25,11 @@ from sglang_omni.models.qwen3_asr.config import Qwen3ASRPipelineConfig
 from sglang_omni.models.qwen3_asr.stages import create_sglang_qwen3_asr_executor
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 from sglang_omni.scheduling.generation_batch_policy import (
-    build_default_prefill_cuda_graph_bs,
     build_generation_batch_overrides,
     validate_generation_batch_policy,
+)
+from sglang_omni.scheduling.sglang_backend.server_args_builder import (
+    fill_prefill_terminal_bucket,
 )
 
 
@@ -37,6 +40,11 @@ def _select_non_mlx_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     # Backend-specific tests opt into MLX explicitly. Keep CUDA/ROCm/Torch MPS
     # profile tests independent of the caller's SGLANG_USE_MLX environment.
     monkeypatch.setattr(tensor_bridge, "use_mlx", lambda: False)
+
+
+def _sglang_prefill_ladder(max_bs: int) -> list[int]:
+    unresolved = ServerArgs.__new__(ServerArgs)
+    return ServerArgs._generate_prefill_cuda_graph_batch_sizes(unresolved, max_bs)
 
 
 def _fake_server_args_builder(
@@ -79,11 +87,7 @@ def _fake_server_args_builder(
             if server_args.max_total_tokens is not None:
                 prefill_max_bs = min(prefill_max_bs, server_args.max_total_tokens)
         if prefill_bs is None:
-            prefill_bs = (
-                build_default_prefill_cuda_graph_bs(prefill_max_bs)
-                if prefill_max_bs > 0
-                else []
-            )
+            prefill_bs = _sglang_prefill_ladder(prefill_max_bs)
         server_args.cuda_graph_config = SimpleNamespace(
             decode=SimpleNamespace(
                 max_bs=overrides["cuda_graph_max_bs"],
@@ -96,6 +100,7 @@ def _fake_server_args_builder(
             ),
         )
         server_args._cuda_graph_config_locked = locked
+        fill_prefill_terminal_bucket(server_args)
         return server_args
 
     return _build
@@ -652,7 +657,7 @@ def test_qwen3_asr_auto_chunked_prefill_uses_the_sglang_ladder(
     assert "cuda_graph_max_bs_prefill" not in recorded.build_kwargs
     assert ("prefill", "bs") not in attested._cuda_graph_config_locked
     assert list(attested.cuda_graph_config.prefill.bs) == (
-        build_default_prefill_cuda_graph_bs(resolved_chunked_prefill_size)
+        _sglang_prefill_ladder(resolved_chunked_prefill_size)
     )
     assert attested.cuda_graph_config.prefill.max_bs == resolved_chunked_prefill_size
     assert (
@@ -700,8 +705,10 @@ def test_qwen3_asr_operator_buckets_above_the_chunk_start_with_a_warning(
     ("cap_override", "expected_cap"),
     [
         ({"chunked_prefill_size": 512}, 512),
+        ({"chunked_prefill_size": 4592}, 4592),
         ({"cuda_graph_max_bs_prefill": 512}, 512),
         ({"max_total_tokens": 640}, 640),
+        ({"max_total_tokens": 1000}, 1000),
     ],
 )
 def test_qwen3_asr_ladder_respects_deployment_cap_overrides(

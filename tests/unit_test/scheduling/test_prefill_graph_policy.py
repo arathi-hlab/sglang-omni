@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sglang.srt.server_args import ServerArgs
 
 from sglang_omni.scheduling.generation_batch_policy import (
     build_default_prefill_cuda_graph_bs,
@@ -468,26 +469,26 @@ def test_padding_gap_warning_requires_a_non_empty_eager_range(caplog) -> None:
     assert any("[(65, 65)]" in record.getMessage() for record in caplog.records)
 
 
-def test_default_prefill_ladder_matches_sglang_generated_ladder() -> None:
-    ladder = build_default_prefill_cuda_graph_bs(512)
-    assert ladder == (
-        list(range(4, 33, 4)) + list(range(48, 257, 16)) + list(range(288, 513, 32))
-    )
-    assert len(ladder) == 30
+def _sglang_prefill_ladder(max_bs: int) -> list[int]:
+    unresolved = ServerArgs.__new__(ServerArgs)
+    return ServerArgs._generate_prefill_cuda_graph_batch_sizes(unresolved, max_bs)
 
-    off_grid = build_default_prefill_cuda_graph_bs(100)
-    assert off_grid[-1] == 100
-    assert off_grid[:-1] == [4, 8, 12, 16, 20, 24, 28, 32, 48, 64, 80, 96]
 
-    assert build_default_prefill_cuda_graph_bs(2) == [2]
+@pytest.mark.parametrize("cap", [256, 512, 2048, 4096, 8192, 16384])
+def test_default_prefill_ladder_matches_the_sglang_generator_on_grid(
+    cap: int,
+) -> None:
+    assert build_default_prefill_cuda_graph_bs(cap) == _sglang_prefill_ladder(cap)
 
-    _validate(
-        _server_args(
-            prefill_backend="breakable",
-            prefill_bs=tuple(ladder),
-            prefill_max_bs=512,
-        )
-    )
+
+@pytest.mark.parametrize("cap", [2, 100, 1000, 4592])
+def test_default_prefill_ladder_appends_the_off_grid_cap_sglang_omits(
+    cap: int,
+) -> None:
+    sglang_ladder = _sglang_prefill_ladder(cap)
+
+    assert not sglang_ladder or sglang_ladder[-1] < cap
+    assert build_default_prefill_cuda_graph_bs(cap) == [*sglang_ladder, cap]
 
 
 def test_overrides_derive_prefill_max_bs_from_buckets() -> None:
