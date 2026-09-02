@@ -39,9 +39,7 @@ struct AppState {
 pub(crate) async fn serve(config: Config) -> Result<(), RouterError> {
     let lifecycle = Arc::new(Lifecycle::starting());
     let pool = Arc::new(WorkerPool::build(&config)?);
-    let classification_slots = Arc::new(Semaphore::new(
-        config.router.max_concurrent_classifications(),
-    ));
+    let classification_slots = Arc::new(Semaphore::new(classification_parallelism()));
     let generation = HttpGeneration::build(
         &config,
         Arc::clone(&pool),
@@ -201,6 +199,10 @@ pub(crate) async fn serve(config: Config) -> Result<(), RouterError> {
         "shutdown complete"
     );
     Ok(())
+}
+
+fn classification_parallelism() -> usize {
+    std::thread::available_parallelism().map_or(1, |parallelism| parallelism.get())
 }
 
 async fn serve_http(

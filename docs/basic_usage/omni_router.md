@@ -132,7 +132,7 @@ The top-level sections are:
 | `server` | Listener address, accepted-connection limit, and request-head timeout |
 | `shutdown` | Graceful drain deadline |
 | `logging` | Structured log format and tracing filter |
-| `router` | Routing policy, classification concurrency, and optional voice owner |
+| `router` | Routing policy and optional voice owner |
 | `admission` | Global and per-service in-flight limits |
 | `health` | Probe interval, timeout, and transition thresholds |
 | `http_generation` | Chat request limits, trust domain, upstream timeouts, and pool settings |
@@ -149,9 +149,8 @@ DNS worker authorities are resolved when an upstream connection is opened, so
 health probes and new data connections follow DNS changes. Worker membership
 remains static for the process lifetime.
 
-Configuration limits are deployment budgets. Set admission, classification
-concurrency, connection-pool limits, and timeouts from the
-expected workload and worker topology.
+Configuration limits are deployment budgets. Set admission, connection-pool
+limits, and timeouts from the expected workload and worker topology.
 
 ## Supported APIs
 

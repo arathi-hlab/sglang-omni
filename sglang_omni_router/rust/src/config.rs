@@ -22,7 +22,6 @@ const DEFAULT_HEADER_READ_TIMEOUT_MS: u64 = 30_000;
 const SCHEMA_VERSION: u32 = 1;
 const MAX_GLOBAL_ADMISSION: u32 = 1_000_000;
 const MAX_CLASS_ADMISSION: u32 = 65_535;
-const DEFAULT_MAX_CONCURRENT_CLASSIFICATIONS: u8 = 4;
 
 /// Fully parsed and validated process configuration.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -108,14 +107,6 @@ impl HttpGenerationConfig {
 pub(crate) struct RouterConfig {
     #[serde(default)]
     pub(crate) strategy: RoutingStrategy,
-    #[serde(default = "default_max_concurrent_classifications")]
-    max_concurrent_classifications: u8,
-}
-
-impl RouterConfig {
-    pub(crate) const fn max_concurrent_classifications(&self) -> usize {
-        self.max_concurrent_classifications as usize
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -305,7 +296,6 @@ impl Config {
                 reason: "invalid filter expression",
             }
         })?;
-        self.validate_router()?;
         self.validate_admission()?;
         self.validate_health()?;
         validate_workers(&self.workers)?;
@@ -387,16 +377,6 @@ impl Config {
         Ok(())
     }
 
-    fn validate_router(&self) -> Result<(), ConfigError> {
-        if !(1..=64).contains(&self.router.max_concurrent_classifications) {
-            return Err(ConfigError::invalid(
-                "router.max_concurrent_classifications",
-                "must be between 1 and 64",
-            ));
-        }
-        Ok(())
-    }
-
     fn validate_admission(&self) -> Result<(), ConfigError> {
         if !(1..=MAX_GLOBAL_ADMISSION).contains(&self.admission.global) {
             return Err(ConfigError::invalid(
@@ -445,20 +425,4 @@ const fn default_max_connections() -> usize {
 }
 const fn default_header_read_timeout_ms() -> u64 {
     DEFAULT_HEADER_READ_TIMEOUT_MS
-}
-
-const fn default_max_concurrent_classifications() -> u8 {
-    DEFAULT_MAX_CONCURRENT_CLASSIFICATIONS
-}
-
-#[cfg(test)]
-#[allow(clippy::expect_used)]
-mod tests {
-    use super::RouterConfig;
-
-    #[test]
-    fn router_classification_concurrency_defaults_to_four() {
-        let router: RouterConfig = toml::from_str("").expect("deserialize minimal router section");
-        assert_eq!(router.max_concurrent_classifications(), 4);
-    }
 }
