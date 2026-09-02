@@ -71,9 +71,7 @@ def build_default_prefill_cuda_graph_bs(max_num_tokens: int) -> list[int]:
 
 
 def _explicit_prefill_cap(overrides: Mapping[str, Any]) -> int | None:
-    """The prefill graph cap SGLang settles on when its inputs are already
-    explicit: a declared positive cap, else a positive explicit chunk bounded
-    by max_total_tokens. None when the chunk is unset or non-positive."""
+    """The cap SGLang derives inside ServerArgs once its inputs are explicit."""
     declared = overrides.get("cuda_graph_max_bs_prefill")
     if declared is not None:
         return int(declared) if int(declared) > 0 else None
@@ -173,10 +171,8 @@ def build_generation_batch_overrides(
         prefill_bs is None
         and overrides.get("cuda_graph_backend_prefill") == CudaGraphBackend.BREAKABLE
     ):
-        # note (ratish): SGLang's prefill generator omits an off-grid cap, so
-        # when the cap is already explicit the ladder is handed over here and
-        # SGLang plans with the final buckets. An unset chunk is resolved from
-        # GPU memory inside ServerArgs, so that case is left to SGLang.
+        # note (ratish): SGLang's prefill generator omits an off-grid cap, and
+        # an unset chunk is only known inside ServerArgs.
         cap = _explicit_prefill_cap(overrides)
         if cap is not None:
             prefill_bs = build_default_prefill_cuda_graph_bs(cap)
@@ -184,13 +180,12 @@ def build_generation_batch_overrides(
             overrides["cuda_graph_bs_prefill"] = prefill_bs
             overrides["cuda_graph_max_bs_prefill"] = cap
     # note (Akazaakane): SGLang sets the prefill max_bs from the chunk even
-    # when a list is declared, so a declared list's cap is filled in here.
+    # when a list is declared.
     if prefill_bs and prefill_max_bs is None:
         overrides["cuda_graph_max_bs_prefill"] = max(int(b) for b in prefill_bs)
     elif prefill_bs and int(prefill_max_bs) < max(int(b) for b in prefill_bs):
         # note (ratish): SGLang keeps a declared list as is, so an operator cap
-        # bounds a stage list only here. An operator cap below the operator's
-        # own list is a contradiction.
+        # bounds a stage list only here.
         cap = int(prefill_max_bs)
         if "cuda_graph_bs_prefill" in incoming:
             raise ValueError(
