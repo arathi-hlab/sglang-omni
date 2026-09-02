@@ -51,26 +51,6 @@ def _apply_platform_decode_cuda_graph_backend(kwargs: dict[str, Any]) -> None:
     kwargs.setdefault("cuda_graph_backend_decode", backend)
 
 
-def fill_prefill_terminal_bucket(server_args: ServerArgs) -> None:
-    """Append the resolved prefill graph cap to a SGLang-derived bucket list
-    whose top falls below it. SGLang's decode generator appends an off-grid
-    max_bs, its prefill generator does not, and the runner replays nothing
-    above the top captured bucket."""
-    if server_args.cuda_graph_config is None:
-        return
-    prefill = server_args.cuda_graph_config.prefill
-    if prefill.backend == CudaGraphBackend.DISABLED:
-        return
-    if ("prefill", "bs") in server_args._cuda_graph_config_locked:
-        return
-    cap = prefill.max_bs
-    if cap is None or int(cap) <= 0:
-        return
-    buckets = [int(bucket) for bucket in prefill.bs or []]
-    if not buckets or buckets[-1] < int(cap):
-        prefill.bs = [*buckets, int(cap)]
-
-
 def build_sglang_server_args(
     model_path: str,
     context_length: int,
@@ -106,7 +86,6 @@ def build_sglang_server_args(
     kwargs.setdefault("device", _platform_device_type())
     _apply_platform_decode_cuda_graph_backend(kwargs)
     server_args = ServerArgs(**kwargs)
-    fill_prefill_terminal_bucket(server_args)
     # DP attention is unsupported; reject at configuration time. Mixed
     # chunked prefill stays allowed (the bridge handles it natively).
     if server_args.enable_dp_attention:

@@ -15,9 +15,6 @@ from sglang_omni.scheduling.generation_batch_policy import (
     build_generation_batch_overrides,
     validate_generation_batch_policy,
 )
-from sglang_omni.scheduling.sglang_backend.server_args_builder import (
-    fill_prefill_terminal_bucket,
-)
 from sglang_omni.vendor.sglang.server_args import override_server_args
 
 
@@ -208,69 +205,6 @@ def test_top_bucket_equal_to_the_chunk_is_silent(caplog) -> None:
         )
 
     assert not caplog.records
-
-
-def test_terminal_bucket_fill_appends_an_off_grid_cap_to_a_derived_list() -> None:
-    server_args = _server_args(
-        prefill_backend="breakable", prefill_bs=[3840, 4096], prefill_max_bs=4592
-    )
-
-    fill_prefill_terminal_bucket(server_args)
-
-    assert server_args.cuda_graph_config.prefill.bs == [3840, 4096, 4592]
-
-
-def test_terminal_bucket_fill_covers_a_cap_below_the_ladder_floor() -> None:
-    server_args = _server_args(
-        prefill_backend="breakable", prefill_bs=[], prefill_max_bs=2
-    )
-
-    fill_prefill_terminal_bucket(server_args)
-
-    assert server_args.cuda_graph_config.prefill.bs == [2]
-
-
-def test_terminal_bucket_fill_is_a_no_op_when_the_top_is_the_cap() -> None:
-    ladder = build_default_prefill_cuda_graph_bs(2048)
-    server_args = _server_args(
-        prefill_backend="breakable", prefill_bs=list(ladder), prefill_max_bs=2048
-    )
-
-    fill_prefill_terminal_bucket(server_args)
-
-    assert server_args.cuda_graph_config.prefill.bs == ladder
-
-
-def test_terminal_bucket_fill_leaves_a_declared_list_alone() -> None:
-    server_args = _server_args(
-        prefill_backend="breakable",
-        prefill_bs=[4096],
-        prefill_max_bs=4592,
-        locked=_PREFILL_BS_LOCKED,
-    )
-
-    fill_prefill_terminal_bucket(server_args)
-
-    assert server_args.cuda_graph_config.prefill.bs == [4096]
-
-
-@pytest.mark.parametrize("prefill_max_bs", [None, 0, -1])
-def test_terminal_bucket_fill_needs_a_positive_cap(prefill_max_bs) -> None:
-    server_args = _server_args(
-        prefill_backend="breakable", prefill_bs=[], prefill_max_bs=prefill_max_bs
-    )
-
-    fill_prefill_terminal_bucket(server_args)
-
-    assert server_args.cuda_graph_config.prefill.bs == []
-
-
-def test_terminal_bucket_fill_skips_a_disabled_backend() -> None:
-    server_args = _server_args(prefill_bs=[4096], prefill_max_bs=4592)
-
-    fill_prefill_terminal_bucket(server_args)
-
-    assert server_args.cuda_graph_config.prefill.bs == [4096]
 
 
 def test_empty_derived_ladder_passes_with_a_warning(caplog) -> None:

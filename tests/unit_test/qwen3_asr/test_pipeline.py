@@ -28,9 +28,6 @@ from sglang_omni.scheduling.generation_batch_policy import (
     build_generation_batch_overrides,
     validate_generation_batch_policy,
 )
-from sglang_omni.scheduling.sglang_backend.server_args_builder import (
-    fill_prefill_terminal_bucket,
-)
 
 
 @pytest.fixture(autouse=True)
@@ -100,7 +97,6 @@ def _fake_server_args_builder(
             ),
         )
         server_args._cuda_graph_config_locked = locked
-        fill_prefill_terminal_bucket(server_args)
         return server_args
 
     return _build
