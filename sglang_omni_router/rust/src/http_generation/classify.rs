@@ -928,8 +928,6 @@ worker_id = "worker-a"
 base_url = "http://127.0.0.1:9"
 trust_domain = "local"
 default_model_id = "omni"
-[workers.capacity]
-generation_http = 4
 [[workers.service_profiles]]
 service = "generation_http"
 model_ids = ["omni", "other"]
@@ -1087,8 +1085,6 @@ worker_id = "worker-b"
 base_url = "http://127.0.0.1:10"
 trust_domain = "local"
 default_model_id = "other"
-[workers.capacity]
-generation_http = 4
 [[workers.service_profiles]]
 service = "generation_http"
 model_ids = ["omni", "other"]

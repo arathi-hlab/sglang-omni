@@ -10,7 +10,7 @@ use axum::routing::{any, get};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
-use tokio::sync::{Semaphore, oneshot, watch};
+use tokio::sync::{oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{error, info, trace};
 
@@ -39,12 +39,7 @@ struct AppState {
 pub(crate) async fn serve(config: Config) -> Result<(), RouterError> {
     let lifecycle = Arc::new(Lifecycle::starting());
     let pool = Arc::new(WorkerPool::build(&config)?);
-    let classification_slots = Arc::new(Semaphore::new(classification_parallelism()));
-    let generation = HttpGeneration::build(
-        &config,
-        Arc::clone(&pool),
-        Arc::clone(&classification_slots),
-    )?;
+    let generation = HttpGeneration::build(&config, Arc::clone(&pool))?;
     let request_ids = RequestIds::new();
     let mut signal_observer = shutdown::SignalObserver::install().map_err(RouterError::Signal)?;
     let app = route_table(
@@ -199,10 +194,6 @@ pub(crate) async fn serve(config: Config) -> Result<(), RouterError> {
         "shutdown complete"
     );
     Ok(())
-}
-
-fn classification_parallelism() -> usize {
-    std::thread::available_parallelism().map_or(1, |parallelism| parallelism.get())
 }
 
 async fn serve_http(
