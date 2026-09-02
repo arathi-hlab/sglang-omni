@@ -12,7 +12,6 @@ import pytest
 from sglang_omni.scheduling.generation_batch_policy import (
     build_default_prefill_cuda_graph_bs,
     build_generation_batch_overrides,
-    finalize_prefill_cuda_graph_buckets,
     validate_generation_batch_policy,
 )
 from sglang_omni.vendor.sglang.server_args import override_server_args
@@ -289,7 +288,7 @@ def test_breakable_prefill_cap_clamp_is_deferred_until_server_args_resolve() -> 
     assert "cuda_graph_bs_prefill" not in overrides
 
 
-def test_nested_prefill_max_bs_trims_a_stage_default_ladder_after_resolution() -> None:
+def test_nested_prefill_max_bs_below_a_stage_default_ladder_warns(caplog) -> None:
     overrides = build_generation_batch_overrides(
         max_running_requests=4,
         cuda_graph_bs_prefill=build_default_prefill_cuda_graph_bs(512),
@@ -299,16 +298,14 @@ def test_nested_prefill_max_bs_trims_a_stage_default_ladder_after_resolution() -
         prefill_backend="breakable",
         prefill_bs=overrides["cuda_graph_bs_prefill"],
         prefill_max_bs=overrides["cuda_graph_max_bs_prefill"],
-        locked={("prefill", "bs"), ("prefill", "max_bs")},
     )
 
-    finalize_prefill_cuda_graph_buckets(
-        server_args,
-        operator_selected_buckets=False,
-    )
+    with caplog.at_level(logging.WARNING):
+        _validate(server_args)
 
+    assert max(server_args.cuda_graph_config.prefill.bs) == 512
     assert server_args.cuda_graph_config.prefill.max_bs == 128
-    assert max(server_args.cuda_graph_config.prefill.bs) == 128
+    assert "max=512 exceeds the per-forward token budget 128" in caplog.text
 
 
 def test_operator_prefill_buckets_are_never_trimmed_by_a_nested_cap() -> None:
@@ -472,7 +469,7 @@ def test_disable_overrides_win_over_default_prefill_backend() -> None:
     assert explicit_conflict["cuda_graph_backend_prefill"] == "breakable"
 
 
-def test_builder_wires_payload_slot_and_attestation(monkeypatch, caplog) -> None:
+def test_builder_wires_payload_slot_and_attestation(monkeypatch) -> None:
     from sglang_omni.scheduling import bootstrap, sglang_backend
     from sglang_omni.scheduling.engine_factory import TtsEngineBuilder
     from sglang_omni.utils import cuda_graph_batch_validator
@@ -561,32 +558,23 @@ def test_builder_wires_payload_slot_and_attestation(monkeypatch, caplog) -> None
         def make_scheduler(self, **kwargs: Any) -> Any:
             return SimpleNamespace(outbox=None, kwargs=kwargs)
 
-    with caplog.at_level(logging.INFO):
-        PolicyBuilder().build(
-            "model",
-            server_args_overrides={
-                "cuda_graph_backend_prefill": "breakable",
-                "cuda_graph_bs_prefill": [128, 256],
-            },
-        )
+    PolicyBuilder().build(
+        "model",
+        server_args_overrides={
+            "cuda_graph_backend_prefill": "breakable",
+            "cuda_graph_bs_prefill": [128, 256],
+        },
+    )
 
     assert infra_kwargs_seen[-1]["enable_prefill_input_embeds"] is True
     assert backend_locks_seen[-1] is True
     assert len(attest_calls) == 1
-    assert (
-        "chunked_prefill_size: auto -> 8192, "
-        "source=SGLang hardware resolution" in caplog.text
-    )
-    assert "chunked_prefill_size is auto-resolved" not in caplog.text
-    assert "prefill_cuda_graph_max_bs:" not in caplog.text
 
-    caplog.clear()
     PolicyBuilder().build("model")
 
     assert "enable_prefill_input_embeds" not in infra_kwargs_seen[-1]
     assert backend_locks_seen[-1] is False
     assert len(attest_calls) == 1
-    assert "chunked_prefill_size is auto-resolved" not in caplog.text
 
 
 def test_builder_rejects_breakable_without_model_opt_in(monkeypatch) -> None:

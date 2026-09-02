@@ -26,7 +26,6 @@ from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 from sglang_omni.scheduling.generation_batch_policy import (
     build_default_prefill_cuda_graph_bs,
     build_generation_batch_overrides,
-    finalize_prefill_cuda_graph_buckets,
     validate_generation_batch_policy,
 )
 
@@ -40,7 +39,11 @@ def _select_non_mlx_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tensor_bridge, "use_mlx", lambda: False)
 
 
-def _fake_server_args_builder(build_kwargs: dict[str, object]):
+def _fake_server_args_builder(
+    build_kwargs: dict[str, object],
+    *,
+    resolved_chunked_prefill_size: int = 8192,
+):
     def _build(model_path, context_length, **overrides):
         del model_path
         build_kwargs.update(overrides)
@@ -55,10 +58,32 @@ def _fake_server_args_builder(build_kwargs: dict[str, object]):
             ("lora_paths", None),
             ("enable_lora", None),
             ("moe_a2a_backend", "none"),
+            ("max_prefill_tokens", 16384),
+            ("max_total_tokens", None),
         ):
             flat.setdefault(name, default)
+        if flat.get("chunked_prefill_size") is None:
+            flat["chunked_prefill_size"] = resolved_chunked_prefill_size
         server_args = SimpleNamespace(context_length=context_length, **flat)
         prefill_bs = overrides.get("cuda_graph_bs_prefill")
+        prefill_max_bs = overrides.get("cuda_graph_max_bs_prefill")
+        locked = set()
+        if "cuda_graph_backend_prefill" in overrides:
+            locked.add(("prefill", "backend"))
+        if prefill_bs is not None:
+            locked.add(("prefill", "bs"))
+        if prefill_max_bs is not None:
+            locked.add(("prefill", "max_bs"))
+        if prefill_max_bs is None:
+            prefill_max_bs = server_args.chunked_prefill_size
+            if server_args.max_total_tokens is not None:
+                prefill_max_bs = min(prefill_max_bs, server_args.max_total_tokens)
+        if prefill_bs is None:
+            prefill_bs = (
+                build_default_prefill_cuda_graph_bs(prefill_max_bs)
+                if prefill_max_bs > 0
+                else []
+            )
         server_args.cuda_graph_config = SimpleNamespace(
             decode=SimpleNamespace(
                 max_bs=overrides["cuda_graph_max_bs"],
@@ -67,14 +92,9 @@ def _fake_server_args_builder(build_kwargs: dict[str, object]):
             prefill=SimpleNamespace(
                 backend=overrides.get("cuda_graph_backend_prefill", "disabled"),
                 bs=prefill_bs,
-                max_bs=overrides.get("cuda_graph_max_bs_prefill"),
+                max_bs=prefill_max_bs,
             ),
         )
-        locked = set()
-        if "cuda_graph_backend_prefill" in overrides:
-            locked.add(("prefill", "backend"))
-        if prefill_bs is not None:
-            locked.add(("prefill", "bs"))
         server_args._cuda_graph_config_locked = locked
         return server_args
 
@@ -576,46 +596,14 @@ def test_qwen3_asr_threads_explicit_cuda_graph_bs(monkeypatch, caplog) -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    ("context_length", "expected_cap"),
-    [
-        (1636, 1636),
-        (512, 512),
-        (8192, 4096),
-    ],
-)
-def test_prefill_ladder_never_exceeds_the_context_length(
-    context_length: int, expected_cap: int
-) -> None:
-    builder = _make_engine_builder(
-        mm_attention_backend="fa3", context_length=context_length
-    )
-    overrides = build_generation_batch_overrides(
-        **builder.generation_defaults(dtype="bfloat16")
-    )
-
-    builder.adjust_overrides(overrides)
-    assert "cuda_graph_bs_prefill" not in overrides
-    server_args = _fake_server_args_builder({})("dummy", context_length, **overrides)
-    finalize_prefill_cuda_graph_buckets(
-        server_args,
-        operator_selected_buckets=False,
-    )
-
-    assert max(server_args.cuda_graph_config.prefill.bs) == expected_cap
-
-
 def test_qwen3_asr_prefill_ladder_is_accepted_by_the_shared_policy(caplog) -> None:
     builder = _make_engine_builder(mm_attention_backend="fa3")
     overrides = build_generation_batch_overrides(
         **builder.generation_defaults(dtype="bfloat16")
     )
     builder.adjust_overrides(overrides)
+    assert "cuda_graph_bs_prefill" not in overrides
     server_args = _fake_server_args_builder({})("dummy", 1636, **overrides)
-    finalize_prefill_cuda_graph_buckets(
-        server_args,
-        operator_selected_buckets=False,
-    )
 
     with caplog.at_level(logging.WARNING):
         validate_generation_batch_policy(
@@ -635,34 +623,30 @@ def test_qwen3_asr_build_initializes_and_attests_prefill_graphs(monkeypatch) -> 
     assert len(recorded.attest_calls) == 1
 
 
-def test_qwen3_asr_auto_chunk_resolves_before_prefill_buckets(
-    monkeypatch, caplog
+@pytest.mark.parametrize(
+    ("resolved_chunked_prefill_size", "exceeds_max_prefill_tokens"),
+    [
+        (2048, False),
+        (8192, True),
+    ],
+)
+def test_qwen3_asr_auto_chunked_prefill_uses_the_sglang_ladder(
+    monkeypatch,
+    caplog,
+    resolved_chunked_prefill_size: int,
+    exceeds_max_prefill_tokens: bool,
 ) -> None:
     recorded = _patch_engine_dependencies(monkeypatch, want_cuda_graph=True)
-    build_resolved_server_args = _fake_server_args_builder(recorded.build_kwargs)
-
-    def _resolve_like_sub_35_gib_gpu(model_path, context_length, **overrides):
-        assert overrides["chunked_prefill_size"] is None
-        assert "cuda_graph_bs_prefill" not in overrides
-        server_args = build_resolved_server_args(
-            model_path,
-            context_length,
-            **overrides,
-        )
-        server_args.chunked_prefill_size = 2048
-        server_args.cuda_graph_config.prefill.max_bs = 2048
-        server_args.cuda_graph_config.prefill.bs = build_default_prefill_cuda_graph_bs(
-            2048
-        )
-        return server_args
-
     monkeypatch.setattr(
         sglang_backend,
         "build_sglang_server_args",
-        _resolve_like_sub_35_gib_gpu,
+        _fake_server_args_builder(
+            recorded.build_kwargs,
+            resolved_chunked_prefill_size=resolved_chunked_prefill_size,
+        ),
     )
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.WARNING):
         scheduler = qwen3_asr_stages.create_sglang_qwen3_asr_executor(
             "dummy",
             server_args_overrides={"chunked_prefill_size": None},
@@ -670,26 +654,56 @@ def test_qwen3_asr_auto_chunk_resolves_before_prefill_buckets(
 
     _, attested = recorded.attest_calls[-1]
     assert scheduler is not None
-    assert attested.chunked_prefill_size == 2048
-    assert max(attested.cuda_graph_config.prefill.bs) == 2048
-    assert 4096 not in attested.cuda_graph_config.prefill.bs
-    assert (
-        "chunked_prefill_size: auto -> 2048, "
-        "source=SGLang hardware resolution" in caplog.text
+    assert recorded.build_kwargs["chunked_prefill_size"] is None
+    assert "cuda_graph_bs_prefill" not in recorded.build_kwargs
+    assert "cuda_graph_max_bs_prefill" not in recorded.build_kwargs
+    assert ("prefill", "bs") not in attested._cuda_graph_config_locked
+    assert list(attested.cuda_graph_config.prefill.bs) == (
+        build_default_prefill_cuda_graph_bs(resolved_chunked_prefill_size)
     )
+    assert attested.cuda_graph_config.prefill.max_bs == resolved_chunked_prefill_size
     assert (
-        "prefill_cuda_graph_max_bs: auto -> 2048, "
-        "derived_from=chunked_prefill_size" in caplog.text
-    )
+        "exceeds the per-forward token budget 4096" in caplog.text
+    ) is exceeds_max_prefill_tokens
+
+
+def test_qwen3_asr_disabled_chunked_prefill_derives_no_buckets(
+    monkeypatch, caplog
+) -> None:
+    recorded = _patch_engine_dependencies(monkeypatch, want_cuda_graph=True)
+
+    with caplog.at_level(logging.WARNING):
+        qwen3_asr_stages.create_sglang_qwen3_asr_executor(
+            "dummy", server_args_overrides={"chunked_prefill_size": 0}
+        )
+
+    _, attested = recorded.attest_calls[-1]
+    assert list(attested.cuda_graph_config.prefill.bs) == []
+    assert len(recorded.graph_init_calls) == 1
+    assert "require a token budget" in caplog.text
+
+
+def test_qwen3_asr_operator_buckets_above_the_budget_start_with_a_warning(
+    monkeypatch, caplog
+) -> None:
+    recorded = _patch_engine_dependencies(monkeypatch, want_cuda_graph=True)
+
+    with caplog.at_level(logging.WARNING):
+        qwen3_asr_stages.create_sglang_qwen3_asr_executor(
+            "dummy", server_args_overrides={"cuda_graph_bs_prefill": [1024, 8192]}
+        )
+
+    _, attested = recorded.attest_calls[-1]
+    assert recorded.build_kwargs["cuda_graph_bs_prefill"] == [1024, 8192]
+    assert recorded.build_kwargs["cuda_graph_max_bs_prefill"] == 8192
+    assert list(attested.cuda_graph_config.prefill.bs) == [1024, 8192]
+    assert "max=8192 exceeds the per-forward token budget 4096" in caplog.text
 
 
 @pytest.mark.parametrize(
     ("cap_override", "expected_cap"),
     [
-        ({"context_length": 1000}, 1000),
         ({"chunked_prefill_size": 512}, 512),
-        ({"chunked_prefill_size": 0}, 4096),
-        ({"max_prefill_tokens": 768}, 768),
         ({"cuda_graph_max_bs_prefill": 512}, 512),
         ({"max_total_tokens": 640}, 640),
     ],
@@ -706,6 +720,10 @@ def test_qwen3_asr_ladder_respects_deployment_cap_overrides(
     )
 
     _, attested = recorded.attest_calls[-1]
+    assert all(
+        recorded.build_kwargs[key] == value for key, value in cap_override.items()
+    )
+    assert "cuda_graph_bs_prefill" not in recorded.build_kwargs
     assert max(attested.cuda_graph_config.prefill.bs) == expected_cap
     assert attested.cuda_graph_config.prefill.max_bs == expected_cap
 

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import copy
 import logging
 from collections.abc import Iterable, Mapping
 from numbers import Integral
@@ -11,8 +10,6 @@ from typing import Any
 
 from sglang.srt.model_executor.cuda_graph_config import Backend as CudaGraphBackend
 from sglang.srt.model_executor.cuda_graph_config import CudaGraphConfig
-
-from sglang_omni.vendor.sglang.server_args import override_server_args
 
 logger = logging.getLogger(__name__)
 
@@ -71,65 +68,6 @@ def build_default_prefill_cuda_graph_bs(max_num_tokens: int) -> list[int]:
     if not values or values[-1] != max_num_tokens:
         values.append(max_num_tokens)
     return values
-
-
-def finalize_prefill_cuda_graph_buckets(
-    server_args: Any,
-    *,
-    operator_selected_buckets: bool,
-) -> None:
-    """Build default prefill buckets from fully resolved ServerArgs."""
-    prefill_config = server_args.cuda_graph_config.prefill
-    if (
-        prefill_config.backend != CudaGraphBackend.BREAKABLE
-        or operator_selected_buckets
-    ):
-        return
-
-    caps = [
-        ("chunked_prefill_size", getattr(server_args, "chunked_prefill_size", None)),
-        ("max_prefill_tokens", getattr(server_args, "max_prefill_tokens", None)),
-        ("max_total_tokens", getattr(server_args, "max_total_tokens", None)),
-        ("context_length", getattr(server_args, "context_length", None)),
-    ]
-    prefill_max_bs = prefill_config.max_bs
-    if prefill_max_bs is not None and int(prefill_max_bs) > 0:
-        caps.append(("cuda_graph_max_bs_prefill", prefill_max_bs))
-
-    resolved_caps = [
-        (name, int(value))
-        for name, value in caps
-        if value is not None and (name != "chunked_prefill_size" or int(value) > 0)
-    ]
-    cap_name, cap = min(resolved_caps, key=lambda item: item[1])
-    locked = server_args._cuda_graph_config_locked
-    previous_cap: int | str = (
-        int(prefill_max_bs)
-        if ("prefill", "max_bs") in locked and prefill_max_bs is not None
-        else "auto"
-    )
-    if ("prefill", "bs") in locked and prefill_config.bs:
-        buckets = [int(bucket) for bucket in prefill_config.bs if int(bucket) <= cap]
-        if not buckets or buckets[-1] != cap:
-            buckets.append(cap)
-    else:
-        buckets = build_default_prefill_cuda_graph_bs(cap)
-
-    cuda_graph_config = copy.deepcopy(server_args.cuda_graph_config)
-    cuda_graph_config.prefill.max_bs = cap
-    cuda_graph_config.prefill.bs = buckets
-    override_server_args(
-        server_args,
-        "sglang_omni.prefill_cuda_graph_buckets",
-        cuda_graph_config=cuda_graph_config,
-    )
-    locked.update({("prefill", "bs"), ("prefill", "max_bs")})
-    logger.info(
-        "prefill_cuda_graph_max_bs: %s -> %d, derived_from=%s",
-        previous_cap,
-        cap,
-        cap_name,
-    )
 
 
 def nested_prefill_overrides(overrides: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -212,8 +150,10 @@ def build_generation_batch_overrides(
         overrides.pop("cuda_graph_bs_prefill", None)
         overrides.pop("cuda_graph_max_bs_prefill", None)
 
-    # Note (Akazaakane): Only derive metadata here; bucket generation and
-    # stage-default trimming require the hardware-resolved ServerArgs values.
+    # note (Akazaakane): SGLang derives the default prefill ladder from the
+    # resolved chunked_prefill_size inside ServerArgs, but sets the prefill
+    # max_bs from the chunk even when a list is declared, so a declared list's
+    # cap is filled in here.
     prefill_bs = overrides.get("cuda_graph_bs_prefill")
     prefill_max_bs = overrides.get("cuda_graph_max_bs_prefill")
     if prefill_bs and prefill_max_bs is None:
