@@ -655,9 +655,12 @@ mod tests {
 
     fn dispatch_subset(pool: &WorkerPool, ordinals: &[usize]) -> usize {
         let lease = pool
-            .dispatch_matching(pool.try_admit().expect("admit subset"), true, |record| {
-                ordinals.contains(&record.registration_id.startup_ordinal())
-            })
+            .dispatch_matching(
+                pool.try_admit(CapacityClass::GenerationHttp, 1)
+                    .expect("admit subset"),
+                true,
+                |record| ordinals.contains(&record.registration_id.startup_ordinal()),
+            )
             .expect("dispatch subset");
         let selected = lease.registration_ordinal();
         drop(lease);
@@ -681,7 +684,7 @@ mod tests {
         );
         assert!(replicas.content_blind_generation_http(&local).is_some());
 
-        let mut missing_default = record(0, "local", "omni", 1);
+        let mut missing_default = record(0, "local", "omni");
         Arc::get_mut(&mut missing_default)
             .expect("new test record is uniquely owned")
             .default_model_id = None;
@@ -1097,12 +1100,13 @@ mod tests {
             std::time::Duration::from_secs(1),
         )
         .expect("media client");
+        let selector = Selector::new(RoutingStrategy::RoundRobin, records.len());
         WorkerPool {
             homogeneous_generation_http: build_content_blind_generation_cohorts(&records),
             homogeneous_media_http: build_content_blind_media_cohorts(&records),
             records,
             admission: AdmissionController::new(8, [Some(8), Some(8), Some(8), Some(8)]),
-            selector: Selector::new(RoutingStrategy::RoundRobin),
+            selector,
             health_client: client.clone(),
             http_client: client,
         }
@@ -1173,7 +1177,7 @@ mod tests {
     fn unrelated_media_only_worker_does_not_change_chat_cohort_or_readiness() {
         let generation = record(0, "local", "omni");
         let media = media_record(1, speech_profile());
-        let pool = media_pool(vec![media, generation]);
+        let pool = media_pool(vec![generation, media]);
         let trust = TrustDomain::new(String::from("local"));
         assert!(pool.generation_http_ready(&trust));
         let lease = pool

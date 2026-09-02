@@ -45,9 +45,6 @@ trust_domain = "local"
 default_model_id = "asr-model"
 health_path = "/health"
 
-[workers.capacity]
-transcription_http = 8
-
 [[workers.service_profiles]]
 service = "transcription_http"
 model_ids = ["asr-model"]
@@ -68,9 +65,6 @@ base_url = "http://127.0.0.1:8201/"
 trust_domain = "local"
 default_model_id = "asr-model"
 health_path = "/health"
-
-[workers.capacity]
-transcription_http = 8
 
 [[workers.service_profiles]]
 service = "transcription_http"

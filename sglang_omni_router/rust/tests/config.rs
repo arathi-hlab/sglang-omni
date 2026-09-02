@@ -38,7 +38,7 @@ impl Drop for TestDir {
 
 fn valid_config(listen: &str, drain_timeout_ms: u64, filter: &str) -> String {
     format!(
-        "schema_version = 1\n\n[server]\nlisten = \"{listen}\"\n\n[shutdown]\ndrain_timeout_ms = {drain_timeout_ms}\n\n[logging]\nformat = \"json\"\nfilter = \"{filter}\"\n\n[router]\nstrategy = \"round_robin\"\n\n[admission]\nglobal = 128\ngeneration_http = 64\n\n[health]\ninterval_ms = 1000\ntimeout_ms = 500\nsuccess_threshold = 2\nfailure_threshold = 3\n\n[http]\nbuffered_request_total_bytes = 8388608\nconnect_timeout_ms = 1000\npool_idle_timeout_ms = 30000\npool_max_idle_per_host = 8\n\n[http_generation]\ntrust_domain = \"local\"\nbuffered_request_max_bytes = 1048576\nstreamed_request_max_bytes = 16777216\nrequest_timeout_ms = 5000\n\n[[workers]]\nworker_id = \"worker-a\"\nbase_url = \"http://127.0.0.1:8000/\"\ntrust_domain = \"local\"\ndefault_model_id = \"omni\"\nhealth_path = \"/health\"\n\n[workers.capacity]\ngeneration_http = 8\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"omni\"]\nmessage_content_forms = [\"string\"]\nmedia_placements = []\ninput_modalities = [\"text\"]\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\"]\n"
+        "schema_version = 1\n\n[server]\nlisten = \"{listen}\"\n\n[shutdown]\ndrain_timeout_ms = {drain_timeout_ms}\n\n[logging]\nformat = \"json\"\nfilter = \"{filter}\"\n\n[router]\nstrategy = \"round_robin\"\n\n[admission]\nglobal = 128\ngeneration_http = 64\n\n[health]\ninterval_ms = 1000\ntimeout_ms = 500\nsuccess_threshold = 2\nfailure_threshold = 3\n\n[http]\nbuffered_request_total_bytes = 8388608\nconnect_timeout_ms = 1000\npool_idle_timeout_ms = 30000\npool_max_idle_per_host = 8\n\n[http_generation]\ntrust_domain = \"local\"\nbuffered_request_max_bytes = 1048576\nstreamed_request_max_bytes = 16777216\nrequest_timeout_ms = 5000\n\n[[workers]]\nworker_id = \"worker-a\"\nbase_url = \"http://127.0.0.1:8000/\"\ntrust_domain = \"local\"\ndefault_model_id = \"omni\"\nhealth_path = \"/health\"\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"omni\"]\nmessage_content_forms = [\"string\"]\nmedia_placements = []\ninput_modalities = [\"text\"]\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\"]\n"
     )
 }
 
@@ -72,15 +72,10 @@ fn append_worker(base: &str, worker_id: &str, port: u16) -> String {
 }
 
 fn valid_translation_config() -> String {
-    let base = valid_config("127.0.0.1:30000", 30_000, "info")
-        .replace(
-            "generation_http = 64",
-            "generation_http = 64\ntranscription_http = 16",
-        )
-        .replace(
-            "generation_http = 8",
-            "generation_http = 8\ntranscription_http = 4",
-        );
+    let base = valid_config("127.0.0.1:30000", 30_000, "info").replace(
+        "generation_http = 64",
+        "generation_http = 64\ntranscription_http = 16",
+    );
     format!(
         "{base}\n[[workers.service_profiles]]\nservice = \"transcription_http\"\nmodel_ids = [\"omni\"]\ntask = \"translate\"\nresponse_formats = [\"json\", \"text\", \"verbose_json\", \"srt\", \"vtt\", \"sse\"]\nstream_modes = [\"non_streaming\", \"streaming\"]\n\n[http_media]\nroutes = [\"translation\"]\ntrust_domain = \"local\"\nbuffered_request_max_bytes = 1048576\nstreamed_request_max_bytes = 16777216\nrequest_timeout_ms = 5000\n"
     )
@@ -88,7 +83,7 @@ fn valid_translation_config() -> String {
 
 fn media_only_config() -> String {
     String::from(
-        "schema_version = 1\n\n[server]\nlisten = \"127.0.0.1:30000\"\n\n[shutdown]\ndrain_timeout_ms = 30000\n\n[logging]\nformat = \"json\"\nfilter = \"info\"\n\n[router]\nstrategy = \"round_robin\"\n\n[admission]\nglobal = 16\ntranscription_http = 8\n\n[health]\ninterval_ms = 1000\ntimeout_ms = 500\nsuccess_threshold = 1\nfailure_threshold = 3\n\n[http]\nbuffered_request_total_bytes = 8388608\nconnect_timeout_ms = 1000\npool_idle_timeout_ms = 30000\npool_max_idle_per_host = 8\n\n[http_media]\nroutes = [\"transcription\"]\ntrust_domain = \"local\"\nbuffered_request_max_bytes = 1048576\nstreamed_request_max_bytes = 16777216\nrequest_timeout_ms = 5000\n\n[[workers]]\nworker_id = \"asr\"\nbase_url = \"http://127.0.0.1:8000/\"\ntrust_domain = \"local\"\ndefault_model_id = \"asr\"\n\n[workers.capacity]\ntranscription_http = 8\n\n[[workers.service_profiles]]\nservice = \"transcription_http\"\nmodel_ids = [\"asr\"]\ntask = \"transcribe\"\nresponse_formats = [\"json\", \"text\", \"verbose_json\", \"srt\", \"vtt\", \"sse\"]\nstream_modes = [\"non_streaming\", \"streaming\"]\n",
+        "schema_version = 1\n\n[server]\nlisten = \"127.0.0.1:30000\"\n\n[shutdown]\ndrain_timeout_ms = 30000\n\n[logging]\nformat = \"json\"\nfilter = \"info\"\n\n[router]\nstrategy = \"round_robin\"\n\n[admission]\nglobal = 16\ntranscription_http = 8\n\n[health]\ninterval_ms = 1000\ntimeout_ms = 500\nsuccess_threshold = 1\nfailure_threshold = 3\n\n[http]\nbuffered_request_total_bytes = 8388608\nconnect_timeout_ms = 1000\npool_idle_timeout_ms = 30000\npool_max_idle_per_host = 8\n\n[http_media]\nroutes = [\"transcription\"]\ntrust_domain = \"local\"\nbuffered_request_max_bytes = 1048576\nstreamed_request_max_bytes = 16777216\nrequest_timeout_ms = 5000\n\n[[workers]]\nworker_id = \"asr\"\nbase_url = \"http://127.0.0.1:8000/\"\ntrust_domain = \"local\"\ndefault_model_id = \"asr\"\n\n[[workers.service_profiles]]\nservice = \"transcription_http\"\nmodel_ids = [\"asr\"]\ntask = \"transcribe\"\nresponse_formats = [\"json\", \"text\", \"verbose_json\", \"srt\", \"vtt\", \"sse\"]\nstream_modes = [\"non_streaming\", \"streaming\"]\n",
     )
 }
 
@@ -327,7 +322,6 @@ fn routing_schema_rejects_unknowns_invalid_bounds_and_profile_counterexamples() 
             "default_model_id = \"omni\"",
             "default_model_id = \"other\"",
         ),
-        base.replace("generation_http = 8", "generation_http = 0"),
         base.replace(
             "message_content_forms = [\"string\"]",
             "message_content_forms = []",
@@ -441,7 +435,7 @@ fn worker_origins_are_strict_and_dns_is_deferred() {
 
 fn additional_worker(worker_id: &str, base_url: &str) -> String {
     format!(
-        "\n[[workers]]\nworker_id = \"{worker_id}\"\nbase_url = \"{base_url}\"\ntrust_domain = \"local\"\ndefault_model_id = \"omni\"\nhealth_path = \"/health\"\n\n[workers.capacity]\ngeneration_http = 8\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"omni\"]\nmessage_content_forms = [\"string\"]\nmedia_placements = []\ninput_modalities = [\"text\"]\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\"]\n"
+        "\n[[workers]]\nworker_id = \"{worker_id}\"\nbase_url = \"{base_url}\"\ntrust_domain = \"local\"\ndefault_model_id = \"omni\"\nhealth_path = \"/health\"\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"omni\"]\nmessage_content_forms = [\"string\"]\nmedia_placements = []\ninput_modalities = [\"text\"]\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\"]\n"
     )
 }
 

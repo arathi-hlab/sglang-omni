@@ -247,9 +247,8 @@ or process drain.
 ## Media and Realtime Sessions
 
 Media routes are enabled independently. Speech batches remain ordered and are
-never split; one worker atomically reserves capacity for the complete batch.
-Speech-batch admission and worker capacity count batch items rather than HTTP
-requests. Classified transcription and translation requests buffer the full
+never split. Speech-batch admission and worker load count batch items rather
+than HTTP requests. Classified transcription and translation requests buffer the full
 multipart upload, so heterogeneous ASR deployments must size the buffered
 limits for their largest accepted recordings. Transcription and translation
 share a capacity class but require separate profile tasks.
@@ -401,7 +400,7 @@ loopback sockets where transport behavior is part of the contract.
 | --- | --- |
 | `src/config.rs` | Strict configuration and cross-field validation |
 | `src/server.rs` | Runtime assembly, routes, listener, and shutdown |
-| `src/worker_pool/` | Admission, health, profiles, policy selection, and capacity |
+| `src/worker_pool/` | Admission, health, profiles, policy selection, and worker load |
 | `src/http_relay/` | Shared HTTP client, buffering, body adapters, and relay |
 | `src/http_generation/` | Chat validation and classification |
 | `src/http_media/` | Speech, batch, transcription, translation, and voices |

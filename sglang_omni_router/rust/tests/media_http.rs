@@ -42,14 +42,6 @@ impl MediaRoute {
         }
     }
 
-    const fn service_name(self) -> &'static str {
-        match self {
-            Self::Speech => "speech_http",
-            Self::SpeechBatch => "speech_batch",
-            Self::Transcription | Self::Translation => "transcription_http",
-        }
-    }
-
     const fn path(self) -> &'static str {
         match self {
             Self::Speech => "/v1/audio/speech",

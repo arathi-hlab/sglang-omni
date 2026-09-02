@@ -21,9 +21,7 @@ use request_body::{BufferedBody, DirectRequestBody};
 pub(crate) use request_body::{SharedUploadState, UploadState};
 use response_body::DirectResponseBody;
 
-pub(crate) use headers::{
-    copy_one, is_request_media_type, parse_content_length, sanitize_response_headers,
-};
+pub(crate) use headers::{is_request_media_type, parse_content_length, sanitize_response_headers};
 
 pub(crate) struct HttpRelay {
     client: reqwest::Client,
@@ -356,7 +354,6 @@ pub(crate) const fn map_dispatch(error: DispatchError) -> HttpFault {
     match error {
         DispatchError::NoEligibleProfile => HttpFault::NoCompatibleWorker,
         DispatchError::Unavailable => HttpFault::RouterUnavailable,
-        DispatchError::Overloaded => HttpFault::RouterOverloaded,
         DispatchError::Internal => HttpFault::InternalError,
     }
 }

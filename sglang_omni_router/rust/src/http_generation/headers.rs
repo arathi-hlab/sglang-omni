@@ -192,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn response_allowlist_preserves_safe_duplicates_and_encoding() {
+    fn response_sanitizer_preserves_end_to_end_headers_and_safe_duplicates() {
         let mut source = HeaderMap::new();
         source.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         source.append(CACHE_CONTROL, HeaderValue::from_static("private"));
@@ -208,7 +208,7 @@ mod tests {
             sanitized.get(CONTENT_ENCODING),
             source.get(CONTENT_ENCODING)
         );
-        assert!(!sanitized.contains_key("set-cookie"));
+        assert_eq!(sanitized.get("set-cookie"), source.get("set-cookie"));
         assert!(!sanitized.contains_key("x-private"));
     }
 

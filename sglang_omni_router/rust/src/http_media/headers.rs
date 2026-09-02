@@ -360,8 +360,7 @@ mod tests {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("audio/wav"));
         headers.insert("x-finish-reason", HeaderValue::from_static("length"));
 
-        let sanitized =
-            sanitize_response(StatusCode::OK, &headers).expect("speech finish reason");
+        let sanitized = sanitize_response(StatusCode::OK, &headers).expect("speech finish reason");
         assert_eq!(
             sanitized.get("x-finish-reason"),
             Some(&HeaderValue::from_static("length"))
@@ -374,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn pcm_metadata_is_optional_worker_owned_and_singular() {
+    fn pcm_metadata_is_optional_and_worker_owned() {
         let complete_source = pcm_headers(true);
         let complete = sanitize_response(StatusCode::OK, &complete_source)
             .expect("streaming PCM complete metadata");
@@ -396,10 +395,9 @@ mod tests {
         }
         let mut duplicate = pcm_headers(true);
         duplicate.append("x-sample-rate", HeaderValue::from_static("48000"));
-        assert_eq!(
-            sanitize_response(StatusCode::OK, &duplicate),
-            Err(HttpFault::UpstreamProtocolError)
-        );
+        let sanitized = sanitize_response(StatusCode::OK, &duplicate)
+            .expect("duplicate worker metadata is relayable");
+        assert_eq!(sanitized.get_all("x-sample-rate").iter().count(), 2);
         let mut nominated = pcm_headers(true);
         nominated.insert(CONNECTION, HeaderValue::from_static("x-sample-rate"));
         let sanitized = sanitize_response(StatusCode::OK, &nominated)
@@ -408,12 +406,12 @@ mod tests {
     }
 
     #[test]
-    fn non_pcm_response_drops_pcm_metadata() {
+    fn non_pcm_response_preserves_worker_metadata() {
         let mut exact = pcm_headers(true);
         exact.insert(CONTENT_TYPE, HeaderValue::from_static("audio/opus"));
         let sanitized = sanitize_response(StatusCode::OK, &exact).expect("non-PCM response");
-        assert!(!sanitized.contains_key("x-sample-rate"));
-        assert!(!sanitized.contains_key("x-channels"));
-        assert!(!sanitized.contains_key("x-bit-depth"));
+        for name in ["x-sample-rate", "x-channels", "x-bit-depth"] {
+            assert_eq!(sanitized.get(name), exact.get(name));
+        }
     }
 }

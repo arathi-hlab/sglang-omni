@@ -545,11 +545,6 @@ worker_id = "worker"
 base_url = "http://127.0.0.1:9"
 trust_domain = "local"
 default_model_id = "tts"
-[workers.capacity]
-generation_http = 1
-speech_http = 4
-speech_batch = 16
-transcription_http = 4
 [[workers.service_profiles]]
 service = "generation_http"
 model_ids = ["tts"]

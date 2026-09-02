@@ -401,7 +401,6 @@ impl RouterProcess {
         Self::start_configured(
             &[("worker-a", worker, hostname, GenerationProfile::Text)],
             global,
-            global,
             timeout_ms,
             "round_robin",
             1_048_576,
@@ -413,20 +412,12 @@ impl RouterProcess {
         global: u32,
         timeout_ms: u64,
     ) -> Self {
-        Self::start_configured(
-            workers,
-            global,
-            global,
-            timeout_ms,
-            "round_robin",
-            1_048_576,
-        )
+        Self::start_configured(workers, global, timeout_ms, "round_robin", 1_048_576)
     }
 
     fn start_configured(
         workers: &[(&str, SocketAddr, bool, GenerationProfile)],
         global: u32,
-        worker_capacity: u32,
         timeout_ms: u64,
         strategy: &str,
         streamed_request_max_bytes: u64,
@@ -440,7 +431,6 @@ impl RouterProcess {
         Self::start_configured_models(
             &workers,
             global,
-            worker_capacity,
             timeout_ms,
             strategy,
             streamed_request_max_bytes,
@@ -450,7 +440,6 @@ impl RouterProcess {
     fn start_configured_models(
         workers: &[(&str, SocketAddr, bool, GenerationProfile, &str)],
         global: u32,
-        worker_capacity: u32,
         timeout_ms: u64,
         strategy: &str,
         streamed_request_max_bytes: u64,
@@ -474,7 +463,7 @@ impl RouterProcess {
             };
             let profile_fields = profile.manifest_fields();
             worker_config.push_str(&format!(
-                "\n[[workers]]\nworker_id = \"{worker_id}\"\nbase_url = \"{base_url}\"\ntrust_domain = \"local\"\ndefault_model_id = \"{default_model_id}\"\nhealth_path = \"/health\"\n\n[workers.capacity]\ngeneration_http = {worker_capacity}\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"{default_model_id}\"]\n{profile_fields}\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\", \"streaming\"]\n"
+                "\n[[workers]]\nworker_id = \"{worker_id}\"\nbase_url = \"{base_url}\"\ntrust_domain = \"local\"\ndefault_model_id = \"{default_model_id}\"\nhealth_path = \"/health\"\n\n[[workers.service_profiles]]\nservice = \"generation_http\"\nmodel_ids = [\"{default_model_id}\"]\n{profile_fields}\noutput_modalities = [\"text\"]\nchat_audio_formats = []\nstream_modes = [\"non_streaming\", \"streaming\"]\n"
             ));
         }
         fs::write(
@@ -816,7 +805,7 @@ fn relay_holds_admission_and_is_not_cut_off_after_commitment() {
     assert_eq!(status(&first), 200);
     let head = response_head(&first).to_ascii_lowercase();
     assert_eq!(head.matches("cache-control:").count(), 2);
-    assert!(!head.contains("set-cookie:"));
+    assert!(head.contains("set-cookie: hidden=1"));
 }
 
 #[test]
@@ -851,25 +840,6 @@ fn homogeneous_replicas_rotate_and_unhealthy_workers_are_filtered() {
 }
 
 #[test]
-fn worker_capacity_is_independent_from_global_admission() {
-    let worker = Worker::start();
-    let router = RouterProcess::start_configured(
-        &[("worker-a", worker.address, false, GenerationProfile::Text)],
-        2,
-        1,
-        2_000,
-        "round_robin",
-        1_048_576,
-    );
-
-    let address = router.address;
-    let slow = thread::spawn(move || post(address, b"slow", None));
-    worker.wait_for_requests(1);
-    assert_eq!(status(&post(router.address, b"{}", None)), 429);
-    assert_eq!(status(&slow.join().expect("join slow client")), 200);
-}
-
-#[test]
 fn least_requests_prefers_the_less_occupied_replica() {
     let (first, second) = Worker::start_pair();
     let router = RouterProcess::start_configured(
@@ -878,7 +848,6 @@ fn least_requests_prefers_the_less_occupied_replica() {
             ("worker-b", second.address, false, GenerationProfile::Text),
         ],
         4,
-        2,
         2_000,
         "least_requests",
         1_048_576,
@@ -1058,7 +1027,6 @@ fn heterogeneous_default_model_ambiguity_requires_an_explicit_model() {
             ),
         ],
         8,
-        8,
         2_000,
         "round_robin",
         1_048_576,
@@ -1196,7 +1164,6 @@ fn outer_deadline_bounds_a_backpressured_upload() {
     let worker = Worker::start_stalled_upload();
     let router = RouterProcess::start_configured(
         &[("worker-a", worker.address, false, GenerationProfile::Text)],
-        1,
         1,
         300,
         "round_robin",

@@ -39,10 +39,6 @@ impl AdmissionLease {
     pub(super) const fn class(&self) -> CapacityClass {
         self.class
     }
-
-    pub(super) const fn credits(&self) -> usize {
-        self.credits
-    }
 }
 
 /// Active worker load retained through response termination.

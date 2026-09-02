@@ -45,9 +45,6 @@ trust_domain = "local"
 default_model_id = "tts-model"
 health_path = "/health"
 
-[workers.capacity]
-speech_http = 8
-
 [[workers.service_profiles]]
 service = "speech_http"
 model_ids = ["tts-model"]
@@ -72,9 +69,6 @@ base_url = "http://127.0.0.1:8101/"
 trust_domain = "local"
 default_model_id = "tts-model"
 health_path = "/health"
-
-[workers.capacity]
-speech_http = 8
 
 [[workers.service_profiles]]
 service = "speech_http"
