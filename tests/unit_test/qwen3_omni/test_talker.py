@@ -640,9 +640,9 @@ def test_qwen_predictor_decode_graph_matches_eager(monkeypatch: pytest.MonkeyPat
     layer0_codes = torch.tensor([[1], [7]], dtype=torch.int, device=device)
     talker_hidden = torch.randn(2, 1, 8, device=device)
 
-    # SGLang 0.5.15 constructs nested model buffers while its outer runner is
-    # in inference mode. Replaying later from a no-grad capture must still be
-    # allowed to update those inference tensors in place.
+    # SGLang constructs nested model buffers while its outer runner is in
+    # inference mode, so graph capture and replay must both run in that mode;
+    # torch 2.9/ROCm refuses a no_grad capture_begin() over inference tensors.
     with torch.inference_mode():
         talker.code_predictor_forward(layer0_codes, talker_hidden)
         torch.cuda.synchronize()
@@ -2410,3 +2410,29 @@ def test_talker_prefill_forward_invalidates_next_decode_reuse() -> None:
     )
 
     assert float(fake._sampling_temperatures[0, 0]) == pytest.approx(0.8)
+
+
+def test_qwen_predictor_decode_graph_skips_outer_sglang_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the predictor eager while SGLang captures its enclosing decode graph.
+
+    SGLang runs warmup forwards inside model_capture_mode() before the stream
+    capture starts, so the capture-mode flag must short-circuit the stream query.
+    """
+    monkeypatch.setattr(talker_module, "get_is_capture_mode", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    def fail_stream_capture_query() -> bool:
+        pytest.fail("SGLang capture mode should short-circuit the stream query")
+
+    monkeypatch.setattr(
+        torch.cuda, "is_current_stream_capturing", fail_stream_capture_query
+    )
+    talker = object.__new__(Qwen3OmniTalker)
+
+    assert not talker._can_use_predictor_decode_graph(
+        layer0_codes=SimpleNamespace(dtype=torch.int, is_cuda=True),
+        talker_hidden=SimpleNamespace(is_cuda=True),
+        seq_len=1,
+    )

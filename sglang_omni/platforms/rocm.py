@@ -27,7 +27,11 @@ class ROCMOmniPlatform(RocmDeviceMixin, OmniPlatform):
             return {}
 
         source_env = env if env is not None else os.environ
-        original_visible = source_env.get("CUDA_VISIBLE_DEVICES")
+        hip_visible = source_env.get("HIP_VISIBLE_DEVICES")
+        visibility_var = (
+            "HIP_VISIBLE_DEVICES" if hip_visible else "CUDA_VISIBLE_DEVICES"
+        )
+        original_visible = source_env.get(visibility_var)
         if spec.gpu_id is None:
             raise ValueError(f"tp stage {spec.stage_name!r} requires a GPU id")
         if original_visible:
@@ -35,17 +39,25 @@ class ROCMOmniPlatform(RocmDeviceMixin, OmniPlatform):
             if spec.gpu_id >= len(visible_devices):
                 raise ValueError(
                     f"tp stage {spec.stage_name!r} assigned gpu_id={spec.gpu_id}, "
-                    f"but CUDA_VISIBLE_DEVICES only exposes {visible_devices}"
+                    f"but {visibility_var} only exposes {visible_devices}"
                 )
             mapped_gpu = visible_devices[spec.gpu_id]
         else:
             mapped_gpu = str(spec.gpu_id)
 
-        return {
+        env_updates = {
             "CUDA_VISIBLE_DEVICES": mapped_gpu,
             "SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS": "true",
             "SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK": "false",
         }
+        if hip_visible:
+            # The HIP runtime honors HIP_VISIBLE_DEVICES over the CUDA alias, so
+            # a HIP-narrowed parent must narrow the child through it as well.
+            # The CUDA alias still carries the same physical id: the startup
+            # lock and sglang's physical-device helpers resolve the card
+            # through CUDA_VISIBLE_DEVICES.
+            env_updates["HIP_VISIBLE_DEVICES"] = mapped_gpu
+        return env_updates
 
     def get_intra_node_transport(self):
         from sglang_omni.comm.data_ref import TransportKind
