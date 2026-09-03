@@ -837,16 +837,7 @@ impl<'de> DeserializeSeed<'de> for NullableAudioSeed {
                 let Some(Some(format)) = format else {
                     return Ok(None);
                 };
-                let value = match format.as_str() {
-                    "wav" => ChatAudioFormat::Wav,
-                    "mp3" => ChatAudioFormat::Mp3,
-                    "flac" => ChatAudioFormat::Flac,
-                    "pcm" => ChatAudioFormat::Pcm,
-                    "aac" => ChatAudioFormat::Aac,
-                    "opus" => ChatAudioFormat::Opus,
-                    _ => return Ok(None),
-                };
-                Ok(Some(value))
+                Ok(parse_audio_format(&format))
             }
 
             fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
@@ -878,6 +869,25 @@ impl<'de> DeserializeSeed<'de> for NullableAudioSeed {
             }
         }
         deserializer.deserialize_any(AudioVisitor)
+    }
+}
+
+fn parse_audio_format(value: &str) -> Option<ChatAudioFormat> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("wav") {
+        Some(ChatAudioFormat::Wav)
+    } else if value.eq_ignore_ascii_case("mp3") {
+        Some(ChatAudioFormat::Mp3)
+    } else if value.eq_ignore_ascii_case("flac") {
+        Some(ChatAudioFormat::Flac)
+    } else if value.eq_ignore_ascii_case("pcm") {
+        Some(ChatAudioFormat::Pcm)
+    } else if value.eq_ignore_ascii_case("aac") {
+        Some(ChatAudioFormat::Aac)
+    } else if value.eq_ignore_ascii_case("opus") {
+        Some(ChatAudioFormat::Opus)
+    } else {
+        None
     }
 }
 
@@ -1011,6 +1021,46 @@ stream_modes = ["non_streaming", "streaming"]
             );
             assert!(classify_with(&body, &pool).is_ok());
         }
+    }
+
+    #[test]
+    fn audio_formats_match_worker_normalization() {
+        let pool = pool("");
+        for (canonical, variant) in [
+            ("wav", " WAV "),
+            ("mp3", " Mp3 "),
+            ("flac", " FLAC "),
+            ("pcm", " pCm "),
+            ("aac", " AAC "),
+            ("opus", " OPUS "),
+        ] {
+            let canonical = format!(
+                r#"{{"messages":[{{"content":"x"}}],"modalities":["audio"],"audio":{{"format":"{canonical}"}}}}"#
+            );
+            let variant = format!(
+                r#"{{"messages":[{{"content":"x"}}],"modalities":["audio"],"audio":{{"format":"{variant}"}}}}"#
+            );
+            assert_eq!(
+                classify_full(variant.as_bytes(), &pool)
+                    .expect("worker-normalized format must classify")
+                    .requirement,
+                classify_full(canonical.as_bytes(), &pool)
+                    .expect("canonical format must classify")
+                    .requirement,
+            );
+        }
+
+        let unknown = classify_full(
+            br#"{"messages":[{"content":"x"}],"modalities":["audio"],"audio":{"format":" vendor "}}"#,
+            &pool,
+        )
+        .expect("unknown worker format falls back to wav");
+        let wav = classify_full(
+            br#"{"messages":[{"content":"x"}],"modalities":["audio"],"audio":{"format":"wav"}}"#,
+            &pool,
+        )
+        .expect("wav request must classify");
+        assert_eq!(unknown.requirement, wav.requirement);
     }
 
     #[test]
@@ -1185,6 +1235,14 @@ stream_modes = ["non_streaming", "streaming"]
             ),
             (
                 r#"{"messages":[{"content":"x"}],"modalities":["audio"],"audio":{"format":"wav","format":"opus"}}"#,
+                r#"{"messages":[{"content":"x"}],"modalities":["audio"],"audio":{"format":"opus"}}"#,
+            ),
+            (
+                r#"{"messages":[{"content":"x"}],"modalities":["audio"],"audio":{"format":"opus","format":" vendor "}}"#,
+                r#"{"messages":[{"content":"x"}],"modalities":["audio"],"audio":{"format":"wav"}}"#,
+            ),
+            (
+                r#"{"messages":[{"content":"x"}],"modalities":["audio"],"audio":{"format":"vendor","format":" OPUS "}}"#,
                 r#"{"messages":[{"content":"x"}],"modalities":["audio"],"audio":{"format":"opus"}}"#,
             ),
         ];
