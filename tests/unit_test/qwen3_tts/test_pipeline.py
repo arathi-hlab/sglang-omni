@@ -4188,6 +4188,34 @@ def test_qwen3_tts_retract_with_chunk_cache_recomputes_from_scratch(
     assert len(req.prefix_indices) == 0
 
 
+def test_qwen3_tts_tail_guard_not_set_under_chunk_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The prompt-only tail guard is vacuous under ChunkCache and must not be set."""
+    from sglang_omni.scheduling import omni_scheduler as scheduler_module
+
+    first = _build_qwen3_tts_sglang_request(monkeypatch)
+
+    def process_result(_, batch, __):
+        for req in batch.reqs:
+            req.output_ids.append(7)
+
+    monkeypatch.setattr(
+        scheduler_module._Upstream, "process_batch_result", process_result
+    )
+    scheduler = object.__new__(OmniScheduler)
+    scheduler.tree_cache = SimpleNamespace(is_chunk_cache=lambda: True)
+    batch = SimpleNamespace(reqs=[first.req])
+    scheduler.process_batch_result(batch, None)
+    scheduler.process_batch_result(batch, None)
+    assert not getattr(first.req, "skip_radix_cache_insert", False)
+
+    # Radix mode on the same scheduler still sets the guard.
+    scheduler.tree_cache = SimpleNamespace(is_chunk_cache=lambda: False)
+    scheduler.process_batch_result(batch, None)
+    assert first.req.skip_radix_cache_insert
+
+
 def test_qwen3_tts_prepared_payload_missing_state_fails_without_rebuild(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

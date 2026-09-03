@@ -1379,9 +1379,12 @@ class OmniScheduler:
     def process_batch_result(self, batch, result) -> None:
         _Upstream.process_batch_result(self, batch, result)
         # note (Richard Wang): cache prompt before blocking tail inserts
-        for req in batch.reqs:
-            if req.output_ids and getattr(req, "_omni_prompt_only_radix", False):
-                req.skip_radix_cache_insert = True
+        # note (Junnan Li): no tree under ChunkCache; the flag only breaks post-retract re-prefill.
+        tree_cache = getattr(self, "tree_cache", None)
+        if tree_cache is None or not tree_cache.is_chunk_cache():
+            for req in batch.reqs:
+                if req.output_ids and getattr(req, "_omni_prompt_only_radix", False):
+                    req.skip_radix_cache_insert = True
 
     def _stamp_batch_launch(self, batch) -> None:
         """Mirror upstream per-forward bookkeeping for custom runner paths."""
