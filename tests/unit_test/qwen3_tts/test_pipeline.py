@@ -4152,6 +4152,42 @@ def test_qwen3_tts_prompt_key_and_tail_guard_order(
     assert first.req.skip_radix_cache_insert
 
 
+def test_qwen3_tts_retract_with_chunk_cache_recomputes_from_scratch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retract under ChunkCache must land in a from-scratch re-prefill state;
+    the persisted skip flag must not resurrect stale prefix_indices.
+    Chunked re-prefill (prompt > chunked_prefill_size) stays uncovered upstream.
+    """
+    from sglang.srt.mem_cache.common import maybe_cache_unfinished_req
+
+    first = _build_qwen3_tts_sglang_request(monkeypatch)
+    req = first.req
+
+    # Generation has started: #1770's tail guard marks the request.
+    req.output_ids.append(7)
+    req.skip_radix_cache_insert = True
+
+    req.reset_for_retract()
+
+    # Flag survives the retract (asserted upstream as well) ...
+    assert req.skip_radix_cache_insert
+    # ... and the request is reset to a from-scratch re-prefill state.
+    assert len(req.prefix_indices) == 0
+    assert req.cache_protected_len == 0
+
+    # With ChunkCache, the flag makes maybe_cache_unfinished_req a no-op:
+    # cache_unfinished_req must not run, and the clean state must survive.
+    calls: list[object] = []
+    chunk_cache = SimpleNamespace(
+        cache_unfinished_req=lambda *a, **k: calls.append(a),
+        is_chunk_cache=lambda: True,
+    )
+    maybe_cache_unfinished_req(req, chunk_cache)
+    assert calls == []
+    assert len(req.prefix_indices) == 0
+
+
 def test_qwen3_tts_prepared_payload_missing_state_fails_without_rebuild(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
