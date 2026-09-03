@@ -25,7 +25,7 @@ use profile::{
     MAX_WORKERS, RegistrationId, ServiceProfile, WorkerId, generation_cohort_is_homogeneous,
 };
 use resolver::{build_generation_client, build_health_client};
-use selection::Selector;
+use selection::{Selector, SelectorGuard};
 
 /// One static startup registration with independently updated health and load.
 pub(super) struct WorkerRecord {
@@ -134,10 +134,11 @@ impl WorkerPool {
             }));
         }
         let homogeneous_generation_http = build_content_blind_generation_cohorts(&records);
+        let selector = Selector::new(config.router.strategy, records.len());
         Ok(Self {
             records,
             admission,
-            selector: Selector::new(config.router.strategy),
+            selector,
             homogeneous_generation_http,
             health_client,
             generation_client,
@@ -199,20 +200,27 @@ impl WorkerPool {
             return Err(DispatchError::Unavailable);
         }
         let eligible = &eligible[..eligible_count];
-        let policy_guard = self.selector.least_requests_guard();
+        let mut selector = self.selector.lock();
         let selected = match self.selector.strategy() {
             RoutingStrategy::RoundRobin => {
-                let start = self.selector.start(eligible_count);
-                Arc::clone(&self.records[eligible[start]])
+                let candidates = candidate_set(eligible);
+                selector
+                    .select(&candidates)
+                    .map(|index| Arc::clone(&self.records[index]))
             }
-            RoutingStrategy::LeastRequests => self.select_least_requests(eligible),
-        };
+            RoutingStrategy::LeastRequests => self.select_least_requests(eligible, &mut selector),
+        }
+        .ok_or(DispatchError::Unavailable)?;
         let lease = RequestLease::new(admission, selected);
-        drop(policy_guard);
+        drop(selector);
         Ok(lease)
     }
 
-    fn select_least_requests(&self, eligible: &[usize]) -> Arc<WorkerRecord> {
+    fn select_least_requests(
+        &self,
+        eligible: &[usize],
+        selector: &mut SelectorGuard<'_>,
+    ) -> Option<Arc<WorkerRecord>> {
         let mut minimum = usize::MAX;
         let mut ties = [0; MAX_WORKERS];
         let mut tie_count = 0;
@@ -228,8 +236,10 @@ impl WorkerPool {
                 tie_count += 1;
             }
         }
-        let index = ties[self.selector.start(tie_count)];
-        Arc::clone(&self.records[index])
+        let candidates = candidate_set(&ties[..tie_count]);
+        selector
+            .select(&candidates)
+            .map(|index| Arc::clone(&self.records[index]))
     }
 
     pub(crate) fn resolve_default_model_id(
@@ -276,6 +286,14 @@ impl WorkerPool {
     pub(crate) fn drain(&self) {
         self.admission.close();
     }
+}
+
+fn candidate_set(indices: &[usize]) -> [bool; MAX_WORKERS] {
+    let mut candidates = [false; MAX_WORKERS];
+    for &index in indices {
+        candidates[index] = true;
+    }
+    candidates
 }
 
 impl ContentBlindGenerationHttp<'_> {
@@ -392,14 +410,26 @@ mod tests {
             std::time::Duration::from_secs(1),
         )
         .expect("test client");
+        let selector = Selector::new(strategy, records.len());
         WorkerPool {
             homogeneous_generation_http: build_content_blind_generation_cohorts(&records),
             records,
             admission: AdmissionController::new(admission, admission),
-            selector: Selector::new(strategy),
+            selector,
             health_client: client.clone(),
             generation_client: client,
         }
+    }
+
+    fn dispatch_subset(pool: &WorkerPool, ordinals: &[usize]) -> usize {
+        let lease = pool
+            .dispatch_matching(pool.try_admit().expect("admit subset"), true, |record| {
+                ordinals.contains(&record.registration_id.startup_ordinal())
+            })
+            .expect("dispatch subset");
+        let selected = lease.registration_ordinal();
+        drop(lease);
+        selected
     }
 
     #[test]
@@ -552,6 +582,47 @@ mod tests {
             drop(lease);
         }
         assert_eq!(selected, [0, 2, 0, 2, 0, 2]);
+    }
+
+    #[test]
+    fn round_robin_rotates_alternating_disjoint_sets() {
+        let pool = pool(
+            RoutingStrategy::RoundRobin,
+            vec![
+                record(0, "local", "omni"),
+                record(1, "local", "omni"),
+                record(2, "local", "omni"),
+                record(3, "local", "omni"),
+            ],
+            8,
+        );
+        let mut selected = Vec::new();
+        for _ in 0..4 {
+            selected.push(dispatch_subset(&pool, &[0, 1]));
+            selected.push(dispatch_subset(&pool, &[2, 3]));
+        }
+
+        assert_eq!(selected, [0, 2, 1, 3, 0, 2, 1, 3]);
+    }
+
+    #[test]
+    fn round_robin_rotates_overlapping_sets_without_starvation() {
+        let pool = pool(
+            RoutingStrategy::RoundRobin,
+            vec![
+                record(0, "local", "omni"),
+                record(1, "local", "omni"),
+                record(2, "local", "omni"),
+            ],
+            8,
+        );
+        let mut selected = Vec::new();
+        for _ in 0..3 {
+            selected.push(dispatch_subset(&pool, &[0, 1]));
+            selected.push(dispatch_subset(&pool, &[1, 2]));
+        }
+
+        assert_eq!(selected, [0, 1, 0, 2, 1, 2]);
     }
 
     #[test]
