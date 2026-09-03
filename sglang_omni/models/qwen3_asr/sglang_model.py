@@ -181,9 +181,7 @@ class Qwen3ASRForConditionalGeneration(nn.Module):
         if waveform is None:
             return item.feature, item.feature_attention_mask
 
-        wave = waveform.to(
-            device=device, dtype=torch.float32, non_blocking=True
-        )
+        wave = waveform.to(device=device, dtype=torch.float32, non_blocking=True)
         feature = log_mel_spectrogram(wave, self._audio_frontend).unsqueeze(0)
         # note (guozhihao-224): drop the pinned waveform after h2d so
         # page-locked host memory does not live through lm decode
@@ -191,9 +189,7 @@ class Qwen3ASRForConditionalGeneration(nn.Module):
         extra.pop("waveform", None)
         mask = extra.get("feature_attention_mask")
         if mask is None:
-            mask = torch.ones(
-                (1, feature.shape[-1]), dtype=torch.long, device=device
-            )
+            mask = torch.ones((1, feature.shape[-1]), dtype=torch.long, device=device)
         return feature, mask
 
     def get_audio_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
