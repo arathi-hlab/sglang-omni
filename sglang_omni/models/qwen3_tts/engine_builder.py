@@ -6,7 +6,7 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from sglang_omni.models.qwen3_tts import request_builders
+from sglang_omni.models.qwen3_tts import CAPABILITIES, request_builders
 from sglang_omni.models.qwen3_tts import stages as qwen3_stages
 from sglang_omni.scheduling.engine_factory import TtsEngineBuilder
 
@@ -25,9 +25,20 @@ class Qwen3TtsEngineBuilder(TtsEngineBuilder):
     model_name = "Qwen3-TTS"
     context_length = 8192
     model_arch_override = "Qwen3TTSTalker"
+    supports_breakable_prefill_cuda_graph = (
+        CAPABILITIES.supports_breakable_prefill_cuda_graph
+    )
 
-    def __init__(self, *, attn_implementation: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        attn_implementation: str | None = None,
+        prefill_coalesce_requests: int = 0,
+        prefill_coalesce_wait_ms: float = 60.0,
+    ) -> None:
         self.attn_implementation = attn_implementation
+        self.prefill_coalesce_requests = prefill_coalesce_requests
+        self.prefill_coalesce_wait_ms = prefill_coalesce_wait_ms
         self.wrapper: Any | None = None
         self._stream_output_builder: Any | None = None
 
@@ -126,6 +137,8 @@ class Qwen3TtsEngineBuilder(TtsEngineBuilder):
             "stream_output_builder": self._stream_output_builder,
             "request_build_max_workers": 4,
             "request_build_max_pending": 16,
+            "prefill_coalesce_requests": self.prefill_coalesce_requests,
+            "prefill_coalesce_wait_ms": self.prefill_coalesce_wait_ms,
         }
 
     def make_abort_callback(self) -> Any | None:
