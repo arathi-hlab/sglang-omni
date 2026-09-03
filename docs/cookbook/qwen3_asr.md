@@ -400,5 +400,4 @@ sgl-omni serve --model-path Qwen/Qwen3-ASR-1.7B \
   transcribed in full via chunking; see Long Audio above. Streaming requests
   are limited to `max_native_clip_s` (1,200s) on MLX/CUDA; Torch MPS caps both
   native and whole-upload requests at 60 seconds.
-- `prompt` is accepted by the HTTP endpoint for OpenAI compatibility, but Qwen3-ASR currently ignores it.
 - Audio is resampled to 16 kHz before transcription.
