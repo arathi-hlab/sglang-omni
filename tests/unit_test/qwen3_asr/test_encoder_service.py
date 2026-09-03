@@ -125,13 +125,16 @@ def _item(
     num_audio_tokens: int,
     *,
     with_feature: bool = True,
+    waveform: torch.Tensor | None = None,
 ) -> SimpleNamespace:
+    extra = {"waveform": waveform} if waveform is not None else {}
     return SimpleNamespace(
         hash=audio_hash,
         audio_fingerprint=str(audio_hash) if audio_hash is not None else None,
         num_audio_tokens=num_audio_tokens,
         feature=torch.zeros(1, 128, 300) if with_feature else None,
         precomputed_embeddings=None,
+        model_specific_data=extra,
     )
 
 
@@ -153,6 +156,16 @@ def test_encode_attaches_lm_ready_embedding_and_clears_feature() -> None:
     assert model.encode_calls == 1
     assert model.grad_enabled_during_encode is False
     assert service.stats()["misses"] == 1
+
+
+def test_encode_clears_consumed_waveform() -> None:
+    service = _make_service()
+    item = _item(7, 3, waveform=torch.zeros(1600))
+
+    service.encode_item(item)
+
+    assert item.feature is None
+    assert "waveform" not in item.model_specific_data
 
 
 def test_submit_returns_before_encoding_completes() -> None:

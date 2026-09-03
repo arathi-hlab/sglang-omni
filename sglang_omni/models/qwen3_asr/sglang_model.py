@@ -176,37 +176,25 @@ class Qwen3ASRForConditionalGeneration(nn.Module):
     def _item_feature_and_mask(
         self, item: MultimodalDataItem, device: torch.device
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        extra = (
-            item.model_specific_data
-            if isinstance(getattr(item, "model_specific_data", None), dict)
-            else None
-        )
-        waveform = extra.get("waveform") if extra else None
+        extra = item.model_specific_data
+        waveform = extra.get("waveform")
         if waveform is None:
-            waveform = getattr(item, "waveform", None)
-        if waveform is not None:
-            frontend = getattr(self, "_audio_frontend", None)
-            if frontend is None:
-                raise RuntimeError(
-                    "Qwen3-ASR received a raw waveform but the GPU audio "
-                    "frontend is not bound"
-                )
-            wave = waveform
-            if not torch.is_tensor(wave):
-                wave = torch.as_tensor(wave, dtype=torch.float32)
-            wave = wave.to(
-                device=device, dtype=torch.float32, non_blocking=True
-            ).reshape(-1)
-            feature = log_mel_spectrogram(wave, frontend).unsqueeze(0)
-            mask = getattr(item, "feature_attention_mask", None)
-            if mask is None and extra is not None:
-                mask = extra.get("feature_attention_mask")
-            if mask is None:
-                mask = torch.ones(
-                    (1, feature.shape[-1]), dtype=torch.long, device=device
-                )
-            return feature, mask
-        return item.feature, getattr(item, "feature_attention_mask", None)
+            return item.feature, item.feature_attention_mask
+
+        wave = waveform.to(
+            device=device, dtype=torch.float32, non_blocking=True
+        )
+        feature = log_mel_spectrogram(wave, self._audio_frontend).unsqueeze(0)
+        # note (guozhihao-224): drop the pinned waveform after h2d so
+        # page-locked host memory does not live through lm decode
+        # (~1.9 mb per 30s clip).
+        extra.pop("waveform", None)
+        mask = extra.get("feature_attention_mask")
+        if mask is None:
+            mask = torch.ones(
+                (1, feature.shape[-1]), dtype=torch.long, device=device
+            )
+        return feature, mask
 
     def get_audio_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
         device = next(self.audio_tower.parameters()).device

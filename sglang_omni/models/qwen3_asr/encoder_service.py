@@ -127,8 +127,10 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
             if self._device.type == "cuda"
             else None
         )
-        # note (guozhihao-224): variable-length embeddings pin for async d2h,
-        # but do not prewarm a fixed-size host pool.
+        # note (guozhihao-224): variable-length embeddings pin for async d2h
+        # but are not prewarmed into a fixed pool. cache_max_bytes is also the
+        # pinned host budget; the caching allocator does not return those
+        # blocks to the os.
         self._pin_host_memory = bool(pin_host_memory) and self._device.type == "cuda"
         self._pin_failures = 0
         self._cache = StageOutputCache(
@@ -399,6 +401,7 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
             embedding.record_stream(torch.cuda.default_stream(self._device))
         item.precomputed_embeddings = embedding
         item.feature = None
+        item.model_specific_data.pop("waveform", None)
         item.format = MultimodalInputFormat.PRECOMPUTED_EMBEDDING
 
     def _drain_batch(

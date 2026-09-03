@@ -2,10 +2,12 @@
 """GPU log-mel for the Qwen3-ASR encoder stream.
 
 Cache-miss request building used to run the checkpoint feature extractor
-on the host (STFT + mel) and then H2D the fbank. That CPU FFT is the unique-input
-limiter at concurrency 8 to 32. This module keeps the same numerics as the
-extractor's torch fbank helper but runs them on the encoder stream from a
-pinned waveform.
+on the host (STFT + mel) and then H2D the fbank. That CPU FFT is the
+unique-input limiter at concurrency 8 to 32. This module follows the
+extractor's torch fbank helper (Nyquist drop, Slaney, log10, max-8,
+(x+4)/4) on the encoder stream from a pinned waveform. CPU matches
+the extractor; CUDA uses cuFFT/cuBLAS and can move a small fraction of
+bins by one ULP after the tower cast.
 """
 
 from __future__ import annotations
@@ -14,8 +16,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-
-_DEFAULT_N_FFT = 400
 
 
 @dataclass
@@ -50,9 +50,9 @@ def bind_audio_frontend(model: Any, extractor: Any) -> AudioFrontend:
     if extractor is None:
         raise ValueError("Qwen3-ASR GPU mel requires a feature extractor")
     try:
-        hop_length = int(extractor.hop_length)
+        hop_length = extractor.hop_length
         filters = extractor.mel_filters
-    except (AttributeError, TypeError) as exc:
+    except AttributeError as exc:
         raise ValueError(
             "Qwen3-ASR feature extractor is missing hop_length or mel_filters"
         ) from exc
@@ -62,24 +62,15 @@ def bind_audio_frontend(model: Any, extractor: Any) -> AudioFrontend:
         )
     if filters is None:
         raise ValueError("Qwen3-ASR feature extractor has no mel_filters")
-    n_fft = int(getattr(extractor, "n_fft", _DEFAULT_N_FFT))
-    if n_fft <= 0:
-        raise ValueError(f"Qwen3-ASR feature extractor has an invalid n_fft: {n_fft}")
     mel_filters = torch.as_tensor(filters, dtype=torch.float32)
-    try:
-        device = next(model.parameters()).device
-    except (StopIteration, AttributeError):
-        pass
-    else:
-        mel_filters = mel_filters.to(device)
     frontend = AudioFrontend(
-        n_fft=n_fft,
+        n_fft=extractor.n_fft,
         hop_length=hop_length,
-        n_mels=int(getattr(extractor, "feature_size", mel_filters.shape[-1])),
-        dither=float(getattr(extractor, "dither", 0.0)),
+        n_mels=extractor.feature_size,
+        dither=extractor.dither,
         mel_filters=mel_filters,
         hann_window=torch.hann_window(
-            n_fft, device=mel_filters.device, dtype=torch.float32
+            extractor.n_fft, device=mel_filters.device, dtype=torch.float32
         ),
     )
     model._audio_frontend = frontend
@@ -92,8 +83,9 @@ def log_mel_spectrogram(
 ) -> torch.Tensor:
     """Return log-mel of shape n_mels by n_frames on the waveform device.
 
-    Matches the checkpoint feature extractor's fbank for a 1-D float32
+    Follows the checkpoint feature extractor's fbank for a 1-D float32
     waveform: drop the Nyquist STFT bin, Slaney mel, log10, max-8, then (x+4)/4.
+    CPU is bit-identical to the extractor; CUDA STFT/GEMM can differ by ULP.
     """
     wave = waveform.reshape(-1).to(dtype=torch.float32)
     frontend.materialize(wave.device, wave.dtype)
@@ -108,11 +100,11 @@ def log_mel_spectrogram(
         window=frontend.hann_window,
         return_complex=True,
     )
-    # note (guozhihao-224): dropping the Nyquist stft bin makes the frame
-    # count equal to samples divided by hop length. the request builder
-    # estimates tokens from hop length instead of running the cpu extractor,
-    # and must not pad or truncate to a 30s window (transformers issue 26241).
-    magnitudes = stft[..., :-1].abs() ** 2
+    # note (guozhihao-224): drop the Nyquist bin so frames equal samples/hop;
+    # the request builder estimates tokens from hop length and must not pad
+    # to a 30s window (transformers issue 26241). contiguous() because the
+    # slice is strided; rocm gemm on that view is the transformers regression.
+    magnitudes = (stft[..., :-1].abs() ** 2).contiguous()
     mel_spec = frontend.mel_filters.T @ magnitudes
     log_spec = torch.clamp(mel_spec, min=1e-10).log10()
     log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)

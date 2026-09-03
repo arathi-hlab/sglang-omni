@@ -108,8 +108,8 @@ def _encode_literal(tokenizer: Any, text: str) -> list[int]:
 
 def _require_hop_length(feature_extractor: Any) -> int:
     try:
-        hop_length = int(feature_extractor.hop_length)
-    except (AttributeError, TypeError) as exc:
+        hop_length = feature_extractor.hop_length
+    except AttributeError as exc:
         raise ValueError(
             "Qwen3-ASR feature extractor is missing its hop length"
         ) from exc
@@ -251,8 +251,6 @@ def make_qwen3_asr_scheduler_adapters(
             # stream runs GPU log-mel from this waveform. pin when CUDA is
             # present so waveform H2D is non-blocking.
             waveform = torch.as_tensor(audio, dtype=torch.float32)
-            if not waveform.is_contiguous():
-                waveform = waveform.contiguous()
             if torch.cuda.is_available():
                 try:
                     waveform = waveform.pin_memory()

@@ -757,14 +757,7 @@ def test_qwen3_asr_embedding_cache_miss_extracts_and_encodes(monkeypatch) -> Non
 
         def submit_item(self, item):
             self.encoded_feature = item.feature
-            extra = (
-                item.model_specific_data
-                if isinstance(getattr(item, "model_specific_data", None), dict)
-                else {}
-            )
-            self.encoded_waveform = extra.get("waveform")
-            if self.encoded_waveform is None:
-                self.encoded_waveform = getattr(item, "waveform", None)
+            self.encoded_waveform = item.model_specific_data.get("waveform")
             item.precomputed_embeddings = torch.zeros((item.num_audio_tokens, 4))
             item.feature = None
             future: concurrent.futures.Future[torch.Tensor] = (

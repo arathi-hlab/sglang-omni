@@ -287,6 +287,14 @@ sgl-omni serve --model-path Qwen/Qwen3-ASR-1.7B \
 
 - Corpus WER stayed 0.0122 for every configuration at every level.
 
+The pre-LM encoder cache (`pre_lm_cache_size_bytes=2GiB`) keeps embeddings in
+page-locked host memory by default so device-to-host copies can run
+asynchronously. Entries are variable-length, so the caching host allocator does
+not return those blocks to the OS until process exit;
+`pre_lm_cache_size_bytes` is also the pinned-host budget. Set
+`--asr.factory.pre_lm_cache_pin_host_memory false` if the host cannot spare
+that.
+
 ## Known Limitations
 
 - The endpoint accepts one uploaded file per request.

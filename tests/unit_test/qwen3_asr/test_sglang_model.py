@@ -196,10 +196,12 @@ def test_get_audio_feature_preserves_masks_in_mixed_batch() -> None:
         SimpleNamespace(
             feature=torch.tensor([[[1.0, 2.0, 90.0, 91.0]]]),
             feature_attention_mask=torch.tensor([[1, 1, 0, 0]]),
+            model_specific_data={},
         ),
         SimpleNamespace(
             feature=torch.tensor([[[3.0, 4.0]]]),
             feature_attention_mask=None,
+            model_specific_data={},
         ),
     ]
 
@@ -218,6 +220,7 @@ def test_get_audio_feature_rejects_mismatched_mask_shape() -> None:
         SimpleNamespace(
             feature=torch.ones((1, 2, 4)),
             feature_attention_mask=torch.ones((1, 3), dtype=torch.long),
+            model_specific_data={},
         )
     ]
 
@@ -234,10 +237,12 @@ def test_get_audio_feature_normalizes_cpu_masks_for_cuda_features() -> None:
         SimpleNamespace(
             feature=torch.tensor([[[1.0, 2.0, 90.0, 91.0]]], device="cuda"),
             feature_attention_mask=torch.tensor([[1, 1, 0, 0]]),
+            model_specific_data={},
         ),
         SimpleNamespace(
             feature=torch.tensor([[[3.0, 4.0]]], device="cuda"),
             feature_attention_mask=None,
+            model_specific_data={},
         ),
     ]
 
@@ -281,3 +286,4 @@ def test_get_audio_feature_runs_gpu_mel_from_waveform() -> None:
     assert tower.seen_features is not None
     assert tower.seen_features.shape[-1] == 100
     assert torch.equal(tower.seen_lengths, torch.tensor([100]))
+    assert "waveform" not in items[0].model_specific_data

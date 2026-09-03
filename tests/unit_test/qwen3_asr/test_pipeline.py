@@ -374,6 +374,7 @@ def _patch_engine_dependencies(
             hop_length=160,
             n_fft=400,
             feature_size=128,
+            dither=0.0,
             mel_filters=[[0.0] * 128] * 201,
         ),
     )
