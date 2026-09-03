@@ -31,6 +31,8 @@ from .tool_funcs.audio_lengths import fun_asr_low_frame_rate_length
 
 logger = logging.getLogger(__name__)
 
+# Note (Akazaakane): Normalize the September 2026 HF key renames while keeping
+# the existing module names compatible with the pinned earlier checkpoint.
 FUN_ASR_HF_TO_SGLANG_MAPPER = WeightsMapper(
     orig_to_new_substr={
         ".feedforward_sequential_memory.": ".fsmn.",
