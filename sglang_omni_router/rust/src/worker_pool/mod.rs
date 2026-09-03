@@ -255,7 +255,7 @@ impl WorkerPool {
             }
             RoutingStrategy::LeastRequests => self.select_least_requests(eligible, &mut selector),
         }
-        .ok_or(DispatchError::Unavailable)?;
+        .ok_or(DispatchError::Internal)?;
         let lease = RequestLease::new(admission, selected);
         drop(selector);
         Ok(lease)
