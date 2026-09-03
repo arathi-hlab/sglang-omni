@@ -116,6 +116,7 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
         max_batch_size: int = 8,
         max_batch_wait_ms: int = 0,
         pin_host_memory: bool = True,
+        max_pinned_bytes: int | None = None,
     ) -> None:
         self._model = model
         reference = next(model.audio_tower.parameters())
@@ -127,10 +128,8 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
             if self._device.type == "cuda"
             else None
         )
-        # note (guozhihao-224): variable-length embeddings pin for async d2h
-        # but are not prewarmed into a fixed pool. cache_max_bytes is also the
-        # pinned host budget; the caching allocator does not return those
-        # blocks to the os.
+        # note (guozhihao-224): lru budget and pinned-host budget are separate;
+        # variable-length blocks are not returned to the os until eviction.
         self._pin_host_memory = bool(pin_host_memory) and self._device.type == "cuda"
         self._pin_failures = 0
         self._cache = StageOutputCache(
@@ -138,6 +137,7 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
             max_bytes=cache_max_bytes,
             cache_device="cpu",
             pin_memory=self._pin_host_memory,
+            max_pinned_bytes=max_pinned_bytes,
         )
         self._namespace = cache_namespace
         self._max_batch_size = max(int(max_batch_size), 1)
@@ -367,6 +367,8 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
                 "encoder_time_s": self._encoder_time_s,
                 "cache_entries": len(self._cache),
                 "cache_bytes": self._cache.current_bytes,
+                "cache_pinned_bytes": self._cache.current_pinned_bytes,
+                "cache_pinned_max_bytes": self._cache.max_pinned_bytes,
                 "cache_evictions": self._cache.eviction_count,
                 "pin_host_memory": self._pin_host_memory,
                 "pin_failures": self._pin_failures,
@@ -495,6 +497,9 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
         complete and already pinned, so the LRU does not pay a blocking D2H.
         """
         if not self._pin_host_memory or self._cache_key(item) is None:
+            return None
+        size_bytes = int(embedding.numel() * embedding.element_size())
+        if not self._cache.can_pin(size_bytes):
             return None
         try:
             host = self._new_pinned_host(int(embedding.shape[0]))

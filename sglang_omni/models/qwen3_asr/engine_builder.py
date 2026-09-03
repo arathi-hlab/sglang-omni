@@ -61,6 +61,7 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder):
         enable_pre_lm_encoder: bool = True,
         pre_lm_cache_max_entries: int = 4096,
         pre_lm_cache_size_bytes: int = 2 * 1024**3,
+        pre_lm_cache_pinned_size_bytes: int = 512 * 1024**2,
         pre_lm_max_batch_size: int = 8,
         pre_lm_max_batch_wait_ms: int = 0,
         enable_encoder_cuda_graph: bool = True,
@@ -76,6 +77,12 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder):
         if pre_lm_max_batch_wait_ms < 0:
             raise ValueError(
                 f"pre_lm_max_batch_wait_ms must be >= 0, got {pre_lm_max_batch_wait_ms}"
+            )
+        if pre_lm_cache_pinned_size_bytes > pre_lm_cache_size_bytes:
+            raise ValueError(
+                "pre_lm_cache_pinned_size_bytes cannot exceed "
+                f"pre_lm_cache_size_bytes ({pre_lm_cache_pinned_size_bytes} > "
+                f"{pre_lm_cache_size_bytes})"
             )
         self.max_running_requests = max_running_requests
         self.max_new_tokens = max_new_tokens
@@ -101,6 +108,7 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder):
         self.enable_pre_lm_encoder = enable_pre_lm_encoder
         self.pre_lm_cache_max_entries = pre_lm_cache_max_entries
         self.pre_lm_cache_size_bytes = pre_lm_cache_size_bytes
+        self.pre_lm_cache_pinned_size_bytes = pre_lm_cache_pinned_size_bytes
         self.pre_lm_max_batch_size = pre_lm_max_batch_size
         self.pre_lm_max_batch_wait_ms = pre_lm_max_batch_wait_ms
         self.enable_encoder_cuda_graph = enable_encoder_cuda_graph
@@ -259,6 +267,7 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder):
                 max_batch_size=self.pre_lm_max_batch_size,
                 max_batch_wait_ms=self.pre_lm_max_batch_wait_ms,
                 pin_host_memory=self.pre_lm_cache_pin_host_memory,
+                max_pinned_bytes=self.pre_lm_cache_pinned_size_bytes,
             )
 
     def should_wait_for_encode(self) -> bool:
