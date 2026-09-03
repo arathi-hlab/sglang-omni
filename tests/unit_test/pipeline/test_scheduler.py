@@ -90,12 +90,14 @@ class _RowSamplingInfo:
 
 def _make_row_aligned_schedule_batch(size: int = 4):
     from sglang.srt.managers.schedule_batch import ScheduleBatch
+    from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
 
     reqs = [
         SimpleNamespace(
             rid=f"req-{index}",
             _omni_data=object(),
             return_logprob=False,
+            return_hidden_states_mode=CaptureHiddenMode.NULL,
             grammar=None,
             finished=lambda: False,
             is_retracted=False,
