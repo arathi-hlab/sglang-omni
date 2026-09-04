@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import struct
 import wave
+from pathlib import Path
 
 import numpy as np
 import pybase64
@@ -260,7 +261,7 @@ def test_load_audio_fast_path_matches_torchaudio(monkeypatch, sample_rate) -> No
 
     fast = load_audio(wav)
 
-    monkeypatch.setattr(audio, "_is_riff_wav", lambda data: False)
+    monkeypatch.setattr(audio, "is_riff_wav", lambda data: False)
     slow = load_audio(wav)
 
     assert fast.dtype == slow.dtype == np.float32
@@ -273,7 +274,7 @@ def test_load_audio_fast_path_matches_torchaudio_stereo(monkeypatch) -> None:
 
     fast = load_audio(wav)
 
-    monkeypatch.setattr(audio, "_is_riff_wav", lambda data: False)
+    monkeypatch.setattr(audio, "is_riff_wav", lambda data: False)
     slow = load_audio(wav)
 
     np.testing.assert_allclose(fast, slow, atol=1e-6)
@@ -362,4 +363,62 @@ def test_load_audio_falls_back_for_24bit_pcm() -> None:
 
 def test_load_audio_falls_back_for_non_wav_bytes() -> None:
     assert audio._try_fast_wav_decode(b"\xffnot a wav" * 10, 16000) is None
-    assert not audio._is_riff_wav(b"ID3\x04" + b"\x00" * 20)
+    assert not audio.is_riff_wav(b"ID3\x04" + b"\x00" * 20)
+
+
+def _g711_wav_bytes(
+    encoding: str, sample_rate: int = 8000, num_samples: int = 8000
+) -> bytes:
+    from sglang_omni.utils.g711 import wrap_g711_as_wav
+
+    codes = np.concatenate(
+        [
+            np.arange(256, dtype=np.uint8),
+            (np.arange(num_samples - 256) % 256).astype(np.uint8),
+        ]
+    )
+    return wrap_g711_as_wav(codes.tobytes(), encoding, sample_rate=sample_rate)
+
+
+@pytest.mark.parametrize("encoding", ["mulaw", "alaw"])
+def test_load_audio_fast_path_matches_torchaudio_for_g711_wav(
+    monkeypatch, encoding
+) -> None:
+    wav = _g711_wav_bytes(encoding)
+
+    fast = load_audio(wav)
+
+    monkeypatch.setattr(audio, "is_riff_wav", lambda data: False)
+    slow = load_audio(wav)
+
+    assert fast.dtype == slow.dtype == np.float32
+    assert fast.shape == slow.shape == (16000,)
+    np.testing.assert_allclose(fast, slow, atol=1e-6)
+
+
+def test_load_audio_fast_path_skips_torchaudio_for_g711_wav(monkeypatch) -> None:
+    def fail_load(*args, **kwargs):
+        raise AssertionError("torchaudio.load should not be called on the fast path")
+
+    monkeypatch.setattr(audio.torchaudio, "load", fail_load)
+
+    samples = load_audio(_g711_wav_bytes("mulaw"))
+
+    assert samples.shape == (16000,)
+
+
+_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+
+
+def test_load_audio_decodes_the_8khz_telephony_fixtures() -> None:
+    from sglang_omni.utils.g711 import normalize_declared_g711
+
+    original = load_audio((_DATA_DIR / "query_to_draw.wav").read_bytes())
+    raw = (_DATA_DIR / "query_to_draw_8k.ulaw").read_bytes()
+    from_raw = load_audio(normalize_declared_g711(raw, "audio/basic"))
+    from_wav = load_audio((_DATA_DIR / "query_to_draw_8k_ulaw.wav").read_bytes())
+
+    assert from_raw.shape == from_wav.shape == original.shape
+    np.testing.assert_array_equal(from_raw, from_wav)
+    correlation = np.corrcoef(from_raw, original)[0, 1]
+    assert correlation > 0.98
