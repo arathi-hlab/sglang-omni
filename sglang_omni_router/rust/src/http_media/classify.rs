@@ -4,9 +4,9 @@ use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor
 
 use crate::error::HttpFault;
 use crate::speech_facts::{
-    SpeechFields, effective_reference_forms, managed_voice as classify_managed_voice,
-    read_field as read_speech_field, reference_forms, response_format as classify_response_format,
-    task as classify_task,
+    BatchSpeechFields, SpeechFields, effective_reference_forms,
+    managed_voice as classify_managed_voice, read_batch_field, read_field as read_speech_field,
+    reference_forms, response_format as classify_response_format, task as classify_task,
 };
 use crate::worker_pool::{
     ModelSelection, ProfileRequirement, ReferenceForm, RouteRequirement, SpeechResponseFormat,
@@ -107,7 +107,8 @@ pub(super) fn batch_with_hints(
     if items.is_empty() || items.len() > usize::from(u16::MAX) {
         return Err(HttpFault::MalformedRequest);
     }
-    let mut models = Vec::with_capacity(items.len());
+    let item_count = items.len();
+    let mut models = Vec::with_capacity(item_count);
     let mut formats = Vec::new();
     let mut tasks = Vec::new();
     let mut references = Vec::new();
@@ -127,6 +128,10 @@ pub(super) fn batch_with_hints(
         .transpose()?;
     let mut managed_voice = false;
     for item in items {
+        if !item.routing_fields_valid() {
+            continue;
+        }
+        let item = item.fields;
         let effective_model = item
             .model
             .clone()
@@ -171,7 +176,7 @@ pub(super) fn batch_with_hints(
             }
         }
     }
-    let batch_size = u16::try_from(models.len()).map_err(|_| HttpFault::MalformedRequest)?;
+    let batch_size = u16::try_from(item_count).map_err(|_| HttpFault::MalformedRequest)?;
     Ok(Classified {
         requirement: RouteRequirement::new(
             ProfileRequirement::SpeechBatch {
@@ -316,11 +321,14 @@ fn parse_speech(bytes: &[u8]) -> Result<SpeechFields, HttpFault> {
     parse(bytes, RootMode::Speech).map(|parsed| parsed.0)
 }
 
-fn parse_batch(bytes: &[u8]) -> Result<(SpeechFields, Vec<SpeechFields>), HttpFault> {
+fn parse_batch(bytes: &[u8]) -> Result<(SpeechFields, Vec<BatchSpeechFields>), HttpFault> {
     parse(bytes, RootMode::Batch)
 }
 
-fn parse(bytes: &[u8], mode: RootMode) -> Result<(SpeechFields, Vec<SpeechFields>), HttpFault> {
+fn parse(
+    bytes: &[u8],
+    mode: RootMode,
+) -> Result<(SpeechFields, Vec<BatchSpeechFields>), HttpFault> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let parsed = RootSeed(mode)
         .deserialize(&mut deserializer)
@@ -340,7 +348,7 @@ enum RootMode {
 struct RootSeed(RootMode);
 
 impl<'de> DeserializeSeed<'de> for RootSeed {
-    type Value = (SpeechFields, Vec<SpeechFields>);
+    type Value = (SpeechFields, Vec<BatchSpeechFields>);
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -353,7 +361,7 @@ impl<'de> DeserializeSeed<'de> for RootSeed {
 struct RootVisitor(RootMode);
 
 impl<'de> Visitor<'de> for RootVisitor {
-    type Value = (SpeechFields, Vec<SpeechFields>);
+    type Value = (SpeechFields, Vec<BatchSpeechFields>);
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a speech request object")
@@ -391,7 +399,7 @@ impl<'de> Visitor<'de> for RootVisitor {
 struct ItemsSeed;
 
 impl<'de> DeserializeSeed<'de> for ItemsSeed {
-    type Value = Vec<SpeechFields>;
+    type Value = Vec<BatchSpeechFields>;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -399,7 +407,7 @@ impl<'de> DeserializeSeed<'de> for ItemsSeed {
     {
         struct ItemsVisitor;
         impl<'de> Visitor<'de> for ItemsVisitor {
-            type Value = Vec<SpeechFields>;
+            type Value = Vec<BatchSpeechFields>;
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("a speech batch item array")
             }
@@ -424,7 +432,7 @@ impl<'de> DeserializeSeed<'de> for ItemsSeed {
 struct ItemSeed;
 
 impl<'de> DeserializeSeed<'de> for ItemSeed {
-    type Value = SpeechFields;
+    type Value = BatchSpeechFields;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -432,7 +440,7 @@ impl<'de> DeserializeSeed<'de> for ItemSeed {
     {
         struct ItemVisitor;
         impl<'de> Visitor<'de> for ItemVisitor {
-            type Value = SpeechFields;
+            type Value = BatchSpeechFields;
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("a speech batch item object")
             }
@@ -440,9 +448,9 @@ impl<'de> DeserializeSeed<'de> for ItemSeed {
             where
                 A: MapAccess<'de>,
             {
-                let mut fields = SpeechFields::default();
+                let mut fields = BatchSpeechFields::default();
                 while let Some(key) = map.next_key::<String>()? {
-                    if !read_speech_field(&key, &mut map, &mut fields)? {
+                    if !read_batch_field(&key, &mut map, &mut fields)? {
                         let _ignored = map.next_value::<IgnoredAny>()?;
                     }
                 }
@@ -637,6 +645,21 @@ stream_modes = ["non_streaming", "streaming"]
     }
 
     #[test]
+    fn malformed_top_level_speech_facts_reject_the_request() {
+        let pool = pool();
+        let trust = TrustDomain::new(String::from("local"));
+        for body in [
+            br#"{"model":"tts","ref_audio":7}"#.as_slice(),
+            br#"{"model":"tts","references":"bad"}"#.as_slice(),
+        ] {
+            assert_eq!(
+                speech(body, &pool, &trust).err(),
+                Some(HttpFault::MalformedRequest)
+            );
+        }
+    }
+
+    #[test]
     fn managed_speech_uses_voice_as_its_reference_requirement() {
         let pool = pool();
         let trust = TrustDomain::new(String::from("local"));
@@ -802,6 +825,41 @@ stream_modes = ["non_streaming", "streaming"]
             Some(HttpFault::MalformedRequest),
             "invalid batch defaults reject the complete request at the worker"
         );
+    }
+
+    #[test]
+    fn malformed_batch_item_facts_do_not_constrain_valid_siblings() {
+        let pool = pool();
+        let trust = TrustDomain::new(String::from("local"));
+        let classified = batch(
+            br#"{
+                "model":"tts",
+                "response_format":"wav",
+                "items":[
+                    {"input":"bad","model":7,"response_format":"mp3","ref_audio":{},"references":"bad"},
+                    {"input":"good","model":7,"model":"other","response_format":[],"response_format":"pcm"}
+                ]
+            }"#,
+            &pool,
+            &trust,
+        )
+        .expect("malformed item remains a worker-owned failure");
+        let ProfileRequirement::SpeechBatch {
+            models,
+            response_formats,
+            reference_forms,
+            batch_size,
+            ..
+        } = classified.requirement.profile()
+        else {
+            panic!("batch requirement")
+        };
+        assert_eq!(*batch_size, 2);
+        assert_eq!(classified.credits, 2);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].expected_model_id(), Some("other"));
+        assert_eq!(response_formats, &[SpeechResponseFormat::Pcm]);
+        assert_eq!(reference_forms, &[ReferenceForm::None]);
     }
 
     #[test]

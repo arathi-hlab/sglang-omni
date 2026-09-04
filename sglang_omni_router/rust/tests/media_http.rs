@@ -495,6 +495,11 @@ fn relays_all_media_routes_with_exact_bytes_headers_and_large_direct_uploads() {
     assert_eq!(response_body(&response), b"{\"results\":[0,1],\"n\":2}");
     assert_eq!(capture.body, batch);
 
+    let mixed_batch = br#"{"items":[{"input":"bad","model":7,"response_format":"mp3"},{"input":"good","model":"tts","response_format":"wav"}]}"#;
+    let (response, capture) = relay("/v1/audio/speech/batch", "application/json", mixed_batch);
+    assert_eq!(response_body(&response), b"{\"results\":[0,1],\"n\":2}");
+    assert_eq!(capture.body, mixed_batch);
+
     let multipart = multipart_body(false, 32);
     let (response, capture) = roundtrip_with_extra_headers(
         &worker,
