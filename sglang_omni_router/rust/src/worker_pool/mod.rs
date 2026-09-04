@@ -42,10 +42,21 @@ pub(super) struct WorkerRecord {
 }
 
 impl WorkerRecord {
-    fn has_profile(&self, requirement: &RouteRequirement) -> bool {
-        self.profiles
-            .iter()
-            .any(|profile| profile.matches(&requirement.profile, self.default_model_id.as_deref()))
+    fn profile_match(&self, requirement: &RouteRequirement) -> (bool, u8) {
+        let mut matched = false;
+        let mut voice_policies = 0;
+        for profile in &self.profiles {
+            if !profile.matches(&requirement.profile, self.default_model_id.as_deref()) {
+                continue;
+            }
+            matched = true;
+            if requirement.profile.has_named_voice()
+                && let Some(policy) = profile.voice_name_policy()
+            {
+                voice_policies |= policy.bit();
+            }
+        }
+        (matched, voice_policies)
     }
 
     fn is_routable(&self) -> bool {
@@ -207,11 +218,19 @@ impl WorkerPool {
             return Err(DispatchError::Internal);
         }
         let mut matching = [false; MAX_WORKERS];
+        let mut voice_policies = 0;
         for (index, record) in self.records.iter().enumerate() {
-            matching[index] = &record.trust_domain == requirement.trust_domain()
-                && record.has_profile(requirement);
+            if &record.trust_domain != requirement.trust_domain() {
+                continue;
+            }
+            let (matched, policies) = record.profile_match(requirement);
+            matching[index] = matched;
+            voice_policies |= policies;
         }
         let profile_found = matching[..self.records.len()].contains(&true);
+        if requirement.profile.has_named_voice() && voice_policies.count_ones() > 1 {
+            return Err(DispatchError::AmbiguousModel);
+        }
         if profile_found && requirement.profile.requires_default_resolution() {
             let mut resolved = None;
             for (index, record) in self.records.iter().enumerate() {
@@ -541,7 +560,7 @@ mod tests {
 
     use super::profile::{
         InputModality, MessageContentForm, ModelSelection, OutputModality, ProfileRequirement,
-        ServiceProfile, StreamMode,
+        ServiceProfile, StreamMode, VoiceNamePolicy,
     };
     use super::*;
 
@@ -568,7 +587,7 @@ mod tests {
             stream_modes: vec![stream_mode],
             tasks: vec![SpeechTask::TextToSpeech],
             reference_forms: vec![ReferenceForm::None],
-            managed_voice: false,
+            voice_name_policy: VoiceNamePolicy::Preset,
         }
     }
 
@@ -1057,7 +1076,7 @@ mod tests {
                 stream_mode: StreamMode::Streaming,
                 task: Some(SpeechTask::TextToSpeech),
                 reference_forms: vec![ReferenceForm::None],
-                managed_voice: false,
+                named_voice: false,
             },
             TrustDomain::new(String::from("local")),
         );
@@ -1173,7 +1192,7 @@ mod tests {
             response_formats: vec![SpeechResponseFormat::Wav],
             tasks: vec![SpeechTask::TextToSpeech],
             reference_forms: vec![ReferenceForm::None],
-            managed_voice: false,
+            voice_name_policy: VoiceNamePolicy::Preset,
             max_batch_size: 8,
         }
     }
@@ -1185,8 +1204,33 @@ mod tests {
             stream_modes: vec![StreamMode::NonStreaming],
             tasks: vec![SpeechTask::TextToSpeech],
             reference_forms: vec![ReferenceForm::None],
-            managed_voice: false,
+            voice_name_policy: VoiceNamePolicy::Preset,
         }
+    }
+
+    fn named_speech_profile(model: &str, policy: VoiceNamePolicy) -> ServiceProfile {
+        ServiceProfile::SpeechHttp {
+            model_ids: vec![model.to_owned()],
+            response_formats: vec![SpeechResponseFormat::Wav],
+            stream_modes: vec![StreamMode::NonStreaming],
+            tasks: vec![SpeechTask::TextToSpeech],
+            reference_forms: vec![ReferenceForm::None],
+            voice_name_policy: policy,
+        }
+    }
+
+    fn named_speech_requirement(model: ModelSelection) -> RouteRequirement {
+        RouteRequirement::new(
+            ProfileRequirement::SpeechHttp {
+                model,
+                response_format: SpeechResponseFormat::Wav,
+                stream_mode: StreamMode::NonStreaming,
+                task: Some(SpeechTask::TextToSpeech),
+                reference_forms: Vec::new(),
+                named_voice: true,
+            },
+            TrustDomain::new(String::from("local")),
+        )
     }
 
     #[test]
@@ -1260,7 +1304,7 @@ mod tests {
                 response_formats: vec![SpeechResponseFormat::Wav],
                 tasks: vec![SpeechTask::TextToSpeech],
                 reference_forms: vec![ReferenceForm::None],
-                managed_voice: false,
+                named_voice: false,
                 batch_size: 3,
             },
             TrustDomain::new(String::from("local")),
@@ -1281,7 +1325,7 @@ mod tests {
                 response_formats: vec![SpeechResponseFormat::Wav],
                 tasks: vec![SpeechTask::TextToSpeech],
                 reference_forms: vec![ReferenceForm::None],
-                managed_voice: false,
+                named_voice: false,
                 batch_size: 5,
             },
             TrustDomain::new(String::from("local")),
@@ -1296,5 +1340,51 @@ mod tests {
         assert_eq!(record.load(), 5);
         drop(lease);
         assert_eq!(record.load(), 0);
+    }
+
+    #[test]
+    fn named_voice_policy_follows_the_selected_model() {
+        let preset = record_with_profile(
+            0,
+            "local",
+            "custom",
+            named_speech_profile("custom", VoiceNamePolicy::Preset),
+        );
+        let uploaded = record_with_profile(
+            1,
+            "local",
+            "base",
+            named_speech_profile("base", VoiceNamePolicy::Uploaded),
+        );
+        let pool = media_pool(vec![preset, uploaded]);
+
+        let preset_lease = pool
+            .dispatch(
+                pool.try_admit(CapacityClass::SpeechHttp, 1)
+                    .expect("preset admission"),
+                &named_speech_requirement(ModelSelection::Explicit(String::from("custom"))),
+            )
+            .expect("preset dispatch");
+        assert_eq!(preset_lease.registration_ordinal(), 0);
+        drop(preset_lease);
+
+        let uploaded_lease = pool
+            .dispatch(
+                pool.try_admit(CapacityClass::SpeechHttp, 1)
+                    .expect("uploaded admission"),
+                &named_speech_requirement(ModelSelection::Explicit(String::from("base"))),
+            )
+            .expect("uploaded dispatch");
+        assert_eq!(uploaded_lease.registration_ordinal(), 1);
+        drop(uploaded_lease);
+
+        assert!(matches!(
+            pool.dispatch(
+                pool.try_admit(CapacityClass::SpeechHttp, 1)
+                    .expect("ambiguous admission"),
+                &named_speech_requirement(ModelSelection::UnresolvedDefault),
+            ),
+            Err(DispatchError::AmbiguousModel)
+        ));
     }
 }

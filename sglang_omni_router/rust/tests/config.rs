@@ -163,7 +163,7 @@ fn speech_batch_profile_maximum_is_independent_from_capacity_budgets() {
     let generation_only = valid_config("127.0.0.1:30000", 30_000, "info").replace(
         "generation_http = 8",
         "generation_http = 8\nspeech_batch = 3",
-    ) + "\n[[workers.service_profiles]]\nservice = \"speech_batch\"\nmodel_ids = [\"omni\"]\nresponse_formats = [\"wav\"]\ntasks = [\"text_to_speech\"]\nreference_forms = [\"none\"]\nmanaged_voice = false\nmax_batch_size = 3\n";
+    ) + "\n[[workers.service_profiles]]\nservice = \"speech_batch\"\nmodel_ids = [\"omni\"]\nresponse_formats = [\"wav\"]\ntasks = [\"text_to_speech\"]\nreference_forms = [\"none\"]\nvoice_name_policy = \"preset\"\nmax_batch_size = 3\n";
     assert!(load_bytes(generation_only.as_bytes()).is_ok());
 
     let base = generation_only.replace(

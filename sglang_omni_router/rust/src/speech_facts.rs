@@ -210,7 +210,7 @@ fn collect_reference_forms(
     result
 }
 
-pub(crate) fn managed_voice(fields: &SpeechFields, references: &[ReferenceForm]) -> bool {
+pub(crate) fn named_voice(fields: &SpeechFields, references: &[ReferenceForm]) -> bool {
     references == [ReferenceForm::None]
         && fields
             .voice

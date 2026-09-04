@@ -5,7 +5,7 @@ use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor
 use crate::error::HttpFault;
 use crate::speech_facts::{
     BatchSpeechFields, SpeechFields, effective_reference_forms,
-    managed_voice as classify_managed_voice, read_batch_field, read_field as read_speech_field,
+    named_voice as classify_named_voice, read_batch_field, read_field as read_speech_field,
     reference_forms, response_format as classify_response_format, task as classify_task,
 };
 use crate::worker_pool::{
@@ -62,8 +62,8 @@ pub(super) fn speech_with_hints(
         .map(|value| classify_task(value).ok_or(HttpFault::MalformedRequest))
         .transpose()?;
     let mut references = reference_forms(&fields);
-    let managed_voice = classify_managed_voice(&fields, &references);
-    if managed_voice {
+    let named_voice = classify_named_voice(&fields, &references);
+    if named_voice {
         references.clear();
     }
     Ok(Classified {
@@ -74,7 +74,7 @@ pub(super) fn speech_with_hints(
                 stream_mode,
                 task,
                 reference_forms: references,
-                managed_voice,
+                named_voice,
             },
             trust.clone(),
         ),
@@ -126,7 +126,8 @@ pub(super) fn batch_with_hints(
         .and_then(Option::as_deref)
         .map(|value| classify_task(value).ok_or(HttpFault::MalformedRequest))
         .transpose()?;
-    let mut managed_voice = false;
+    let default_references = reference_forms(&defaults);
+    let mut named_voice = classify_named_voice(&defaults, &default_references);
     for item in items {
         if !item.routing_fields_valid() {
             continue;
@@ -165,11 +166,11 @@ pub(super) fn batch_with_hints(
             .clone()
             .flatten()
             .or_else(|| defaults.voice.clone().flatten());
-        let item_managed_voice = !explicit_reference
+        let item_named_voice = !explicit_reference
             && voice
                 .is_some_and(|value| !value.is_empty() && !value.eq_ignore_ascii_case("default"));
-        if item_managed_voice {
-            managed_voice = true;
+        if item_named_voice {
+            named_voice = true;
         } else {
             for form in effective_references {
                 insert_once(&mut references, form);
@@ -184,7 +185,7 @@ pub(super) fn batch_with_hints(
                 response_formats: formats,
                 tasks,
                 reference_forms: references,
-                managed_voice,
+                named_voice,
                 batch_size,
             },
             trust.clone(),
@@ -536,7 +537,7 @@ response_formats = ["mp3", "opus", "aac", "flac", "wav"]
 stream_modes = ["non_streaming"]
 tasks = ["text_to_speech", "voice_clone", "voice_design"]
 reference_forms = ["none", "direct", "list", "vq_codes"]
-managed_voice = false
+voice_name_policy = "preset"
 [[workers.service_profiles]]
 service = "speech_http"
 model_ids = ["tts", "other"]
@@ -544,14 +545,14 @@ response_formats = ["pcm"]
 stream_modes = ["non_streaming", "streaming"]
 tasks = ["text_to_speech", "voice_clone", "voice_design"]
 reference_forms = ["none", "direct", "list", "vq_codes"]
-managed_voice = false
+voice_name_policy = "preset"
 [[workers.service_profiles]]
 service = "speech_batch"
 model_ids = ["tts", "other"]
 response_formats = ["mp3", "opus", "aac", "flac", "wav", "pcm"]
 tasks = ["text_to_speech", "voice_clone", "voice_design"]
 reference_forms = ["none", "direct", "list", "vq_codes"]
-managed_voice = false
+voice_name_policy = "preset"
 max_batch_size = 16
 [[workers.service_profiles]]
 service = "transcription_http"
@@ -595,7 +596,7 @@ stream_modes = ["non_streaming", "streaming"]
             stream_mode,
             task,
             reference_forms,
-            managed_voice,
+            named_voice,
             ..
         } = classified.requirement.profile()
         else {
@@ -611,7 +612,7 @@ stream_modes = ["non_streaming", "streaming"]
                 ReferenceForm::VqCodes,
             ]
         );
-        assert!(!managed_voice);
+        assert!(!named_voice);
         let duplicate = speech(br#"{"model":"a","model":"tts","input":"x"}"#, &pool, &trust)
             .expect("duplicate JSON fields use last-wins parsing");
         let ProfileRequirement::SpeechHttp { model, .. } = duplicate.requirement.profile() else {
@@ -632,7 +633,7 @@ stream_modes = ["non_streaming", "streaming"]
             let ProfileRequirement::SpeechHttp {
                 task,
                 reference_forms,
-                managed_voice,
+                named_voice,
                 ..
             } = classified.requirement.profile()
             else {
@@ -640,7 +641,7 @@ stream_modes = ["non_streaming", "streaming"]
             };
             assert_eq!(*task, None);
             assert_eq!(reference_forms, &[ReferenceForm::List]);
-            assert!(!managed_voice, "voice takes precedence over speaker");
+            assert!(!named_voice, "voice takes precedence over speaker");
         }
     }
 
@@ -660,7 +661,7 @@ stream_modes = ["non_streaming", "streaming"]
     }
 
     #[test]
-    fn managed_speech_uses_voice_as_its_reference_requirement() {
+    fn named_speech_uses_voice_as_its_reference_requirement() {
         let pool = pool();
         let trust = TrustDomain::new(String::from("local"));
         let classified = speech(
@@ -671,14 +672,14 @@ stream_modes = ["non_streaming", "streaming"]
         .expect("classify managed speech");
         let ProfileRequirement::SpeechHttp {
             reference_forms,
-            managed_voice,
+            named_voice,
             ..
         } = classified.requirement.profile()
         else {
             panic!("speech requirement")
         };
         assert!(reference_forms.is_empty());
-        assert!(*managed_voice);
+        assert!(*named_voice);
     }
 
     #[test]
@@ -699,7 +700,7 @@ stream_modes = ["non_streaming", "streaming"]
             response_formats,
             tasks,
             reference_forms,
-            managed_voice,
+            named_voice,
             batch_size,
         } = classified.requirement.profile()
         else {
@@ -725,13 +726,13 @@ stream_modes = ["non_streaming", "streaming"]
             ]
         );
         assert!(
-            !managed_voice,
-            "explicit references avoid managed voice routing"
+            !named_voice,
+            "explicit references avoid named voice routing"
         );
     }
 
     #[test]
-    fn batch_default_named_voice_is_ignored_when_every_item_overrides_it() {
+    fn batch_default_named_voice_remains_a_top_level_requirement() {
         let pool = pool();
         let trust = TrustDomain::new(String::from("local"));
         let body = br#"{
@@ -745,7 +746,7 @@ stream_modes = ["non_streaming", "streaming"]
         let classified = batch(body, &pool, &trust).expect("classify overridden default voice");
         let ProfileRequirement::SpeechBatch {
             reference_forms,
-            managed_voice,
+            named_voice,
             ..
         } = classified.requirement.profile()
         else {
@@ -755,11 +756,11 @@ stream_modes = ["non_streaming", "streaming"]
             reference_forms,
             &[ReferenceForm::Direct, ReferenceForm::List]
         );
-        assert!(!managed_voice);
+        assert!(*named_voice);
     }
 
     #[test]
-    fn batch_combines_managed_and_external_reference_requirements() {
+    fn batch_combines_named_voice_and_external_reference_requirements() {
         let pool = pool();
         let trust = TrustDomain::new(String::from("local"));
         let classified = batch(
@@ -778,7 +779,7 @@ stream_modes = ["non_streaming", "streaming"]
         .expect("classify mixed managed batch");
         let ProfileRequirement::SpeechBatch {
             reference_forms,
-            managed_voice,
+            named_voice,
             ..
         } = classified.requirement.profile()
         else {
@@ -788,7 +789,7 @@ stream_modes = ["non_streaming", "streaming"]
             reference_forms,
             &[ReferenceForm::Direct, ReferenceForm::None]
         );
-        assert!(*managed_voice);
+        assert!(*named_voice);
     }
 
     #[test]
@@ -911,7 +912,7 @@ stream_modes = ["non_streaming", "streaming"]
     fn preserves_empty_whitespace_model_and_voice_semantics() {
         let pool = pool();
         let trust = TrustDomain::new(String::from("local"));
-        for (body, defaulted, expected_model, managed) in [
+        for (body, defaulted, expected_model, named) in [
             (
                 br#"{"model":"","input":"x","voice":""}"#.as_slice(),
                 true,
@@ -933,9 +934,7 @@ stream_modes = ["non_streaming", "streaming"]
         ] {
             let classified = speech(body, &pool, &trust).expect("classify model and voice facts");
             let ProfileRequirement::SpeechHttp {
-                model,
-                managed_voice,
-                ..
+                model, named_voice, ..
             } = classified.requirement.profile()
             else {
                 panic!("speech requirement")
@@ -945,19 +944,19 @@ stream_modes = ["non_streaming", "streaming"]
                 matches!(model, ModelSelection::UnresolvedDefault),
                 defaulted
             );
-            assert_eq!(*managed_voice, managed);
+            assert_eq!(*named_voice, named);
         }
 
         for (voice, expected) in [("", false), ("DEFAULT", false), (" default ", true)] {
             let body = format!(r#"{{"voice":"{voice}","items":[{{"input":"x"}}]}}"#);
             let classified =
-                batch(body.as_bytes(), &pool, &trust).expect("classify batch managed voice fact");
-            let ProfileRequirement::SpeechBatch { managed_voice, .. } =
+                batch(body.as_bytes(), &pool, &trust).expect("classify batch named voice fact");
+            let ProfileRequirement::SpeechBatch { named_voice, .. } =
                 classified.requirement.profile()
             else {
                 panic!("batch requirement")
             };
-            assert_eq!(*managed_voice, expected);
+            assert_eq!(*named_voice, expected);
         }
     }
 

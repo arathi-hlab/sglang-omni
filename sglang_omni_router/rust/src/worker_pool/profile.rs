@@ -176,6 +176,22 @@ pub(crate) enum ReferenceForm {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
 #[serde(rename_all = "snake_case")]
+pub(crate) enum VoiceNamePolicy {
+    Preset,
+    Uploaded,
+}
+
+impl VoiceNamePolicy {
+    pub(super) const fn bit(self) -> u8 {
+        match self {
+            Self::Preset => 1,
+            Self::Uploaded => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum SpeechToTextTask {
     Transcribe,
     Translate,
@@ -210,14 +226,14 @@ pub(crate) enum ServiceProfile {
         stream_modes: Vec<StreamMode>,
         tasks: Vec<SpeechTask>,
         reference_forms: Vec<ReferenceForm>,
-        managed_voice: bool,
+        voice_name_policy: VoiceNamePolicy,
     },
     SpeechBatch {
         model_ids: Vec<String>,
         response_formats: Vec<SpeechResponseFormat>,
         tasks: Vec<SpeechTask>,
         reference_forms: Vec<ReferenceForm>,
-        managed_voice: bool,
+        voice_name_policy: VoiceNamePolicy,
         max_batch_size: u16,
     },
     TranscriptionHttp {
@@ -252,14 +268,14 @@ pub(crate) enum ProfileRequirement {
         stream_mode: StreamMode,
         task: Option<SpeechTask>,
         reference_forms: Vec<ReferenceForm>,
-        managed_voice: bool,
+        named_voice: bool,
     },
     SpeechBatch {
         models: Vec<ModelSelection>,
         response_formats: Vec<SpeechResponseFormat>,
         tasks: Vec<SpeechTask>,
         reference_forms: Vec<ReferenceForm>,
-        managed_voice: bool,
+        named_voice: bool,
         batch_size: u16,
     },
     TranscriptionHttp {
@@ -361,6 +377,15 @@ impl ProfileRequirement {
             Self::SpeechBatch { models, .. } => {
                 models.iter().any(ModelSelection::requires_resolution)
             }
+        }
+    }
+
+    pub(super) const fn has_named_voice(&self) -> bool {
+        match self {
+            Self::SpeechHttp { named_voice, .. } | Self::SpeechBatch { named_voice, .. } => {
+                *named_voice
+            }
+            Self::GenerationHttp { .. } | Self::TranscriptionHttp { .. } => false,
         }
     }
 }
@@ -537,7 +562,7 @@ impl ServiceProfile {
                     stream_modes: asm,
                     tasks: at,
                     reference_forms: ar,
-                    managed_voice: av,
+                    voice_name_policy: av,
                 },
                 Self::SpeechHttp {
                     model_ids: bm,
@@ -545,7 +570,7 @@ impl ServiceProfile {
                     stream_modes: bsm,
                     tasks: bt,
                     reference_forms: br,
-                    managed_voice: bv,
+                    voice_name_policy: bv,
                 },
             ) => {
                 av == bv
@@ -561,7 +586,7 @@ impl ServiceProfile {
                     response_formats: af,
                     tasks: at,
                     reference_forms: ar,
-                    managed_voice: av,
+                    voice_name_policy: av,
                     max_batch_size: ab,
                 },
                 Self::SpeechBatch {
@@ -569,7 +594,7 @@ impl ServiceProfile {
                     response_formats: bf,
                     tasks: bt,
                     reference_forms: br,
-                    managed_voice: bv,
+                    voice_name_policy: bv,
                     max_batch_size: bb,
                 },
             ) => {
@@ -639,7 +664,7 @@ impl ServiceProfile {
                     stream_modes,
                     tasks,
                     reference_forms,
-                    managed_voice,
+                    ..
                 },
                 ProfileRequirement::SpeechHttp {
                     model,
@@ -647,14 +672,13 @@ impl ServiceProfile {
                     stream_mode,
                     task,
                     reference_forms: required_references,
-                    managed_voice: required_voice,
+                    ..
                 },
             ) => {
                 model.matches_profile_models(model_ids, worker_default)
                     && response_formats.contains(response_format)
                     && stream_modes.contains(stream_mode)
                     && task.is_none_or(|task| tasks.contains(&task))
-                    && (!*required_voice || *managed_voice)
                     && contains_all(reference_forms, required_references)
             }
             (
@@ -663,16 +687,16 @@ impl ServiceProfile {
                     response_formats,
                     tasks,
                     reference_forms,
-                    managed_voice,
                     max_batch_size,
+                    ..
                 },
                 ProfileRequirement::SpeechBatch {
                     models,
                     response_formats: required_formats,
                     tasks: required_tasks,
                     reference_forms: required_references,
-                    managed_voice: required_voice,
                     batch_size,
+                    ..
                 },
             ) => {
                 models
@@ -681,7 +705,6 @@ impl ServiceProfile {
                     && *batch_size <= *max_batch_size
                     && contains_all(response_formats, required_formats)
                     && contains_all(tasks, required_tasks)
-                    && (!*required_voice || *managed_voice)
                     && contains_all(reference_forms, required_references)
             }
             (
@@ -727,6 +750,18 @@ impl ServiceProfile {
             Self::SpeechHttp { .. } => ServiceClass::SpeechHttp,
             Self::SpeechBatch { .. } => ServiceClass::SpeechBatch,
             Self::TranscriptionHttp { .. } => ServiceClass::TranscriptionHttp,
+        }
+    }
+
+    pub(super) const fn voice_name_policy(&self) -> Option<VoiceNamePolicy> {
+        match self {
+            Self::SpeechHttp {
+                voice_name_policy, ..
+            }
+            | Self::SpeechBatch {
+                voice_name_policy, ..
+            } => Some(*voice_name_policy),
+            Self::GenerationHttp { .. } | Self::TranscriptionHttp { .. } => None,
         }
     }
 }
@@ -978,7 +1013,7 @@ mod tests {
             stream_modes: vec![StreamMode::NonStreaming, StreamMode::Streaming],
             tasks: vec![SpeechTask::TextToSpeech],
             reference_forms: vec![ReferenceForm::None],
-            managed_voice: false,
+            voice_name_policy: VoiceNamePolicy::Preset,
         };
         assert!(speech(vec![SpeechResponseFormat::Pcm]).validate().is_ok());
         assert!(
@@ -996,7 +1031,7 @@ mod tests {
             stream_modes: vec![StreamMode::NonStreaming],
             tasks: vec![SpeechTask::TextToSpeech],
             reference_forms: vec![ReferenceForm::None],
-            managed_voice: false,
+            voice_name_policy: VoiceNamePolicy::Preset,
         };
         let mut missing_service_default = worker();
         missing_service_default
@@ -1106,23 +1141,24 @@ mod tests {
     }
 
     #[test]
-    fn managed_voice_satisfies_reference_capability_without_excluding_stateless_requests() {
+    fn named_voice_policy_is_independent_of_reference_capability() {
         let row = ServiceProfile::SpeechHttp {
             model_ids: vec![String::from("tts")],
             response_formats: vec![SpeechResponseFormat::Wav],
             stream_modes: vec![StreamMode::NonStreaming],
             tasks: vec![SpeechTask::TextToSpeech],
             reference_forms: vec![ReferenceForm::Direct],
-            managed_voice: true,
+            voice_name_policy: VoiceNamePolicy::Uploaded,
         };
-        let requirement = |reference_forms, managed_voice| ProfileRequirement::SpeechHttp {
+        let requirement = |reference_forms, named_voice| ProfileRequirement::SpeechHttp {
             model: ModelSelection::Explicit(String::from("tts")),
             response_format: SpeechResponseFormat::Wav,
             stream_mode: StreamMode::NonStreaming,
             task: None,
             reference_forms,
-            managed_voice,
+            named_voice,
         };
+        assert_eq!(row.voice_name_policy(), Some(VoiceNamePolicy::Uploaded));
         assert!(row.matches(&requirement(Vec::new(), true), Some("tts")));
         assert!(row.matches(
             &requirement(vec![ReferenceForm::Direct], false),
@@ -1132,13 +1168,13 @@ mod tests {
     }
 
     #[test]
-    fn speech_batch_combines_managed_voice_and_reference_requirements() {
+    fn speech_batch_combines_named_voice_and_reference_requirements() {
         let mut row = ServiceProfile::SpeechBatch {
             model_ids: vec![String::from("tts")],
             response_formats: vec![SpeechResponseFormat::Wav],
             tasks: vec![SpeechTask::TextToSpeech],
             reference_forms: vec![ReferenceForm::None],
-            managed_voice: true,
+            voice_name_policy: VoiceNamePolicy::Uploaded,
             max_batch_size: 2,
         };
         let requirement = ProfileRequirement::SpeechBatch {
@@ -1146,7 +1182,7 @@ mod tests {
             response_formats: vec![SpeechResponseFormat::Wav],
             tasks: vec![SpeechTask::TextToSpeech],
             reference_forms: vec![ReferenceForm::Direct],
-            managed_voice: true,
+            named_voice: true,
             batch_size: 2,
         };
         assert!(!row.matches(&requirement, Some("tts")));
