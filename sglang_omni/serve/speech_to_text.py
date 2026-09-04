@@ -40,6 +40,7 @@ from sglang_omni.serve.streaming import (
 from sglang_omni.serve.subtitles import segments_to_srt, segments_to_vtt
 from sglang_omni.serve.transcription_adapters import resolve_adapter
 from sglang_omni.serve.transcription_adapters.base import TranscriptionAdapter
+from sglang_omni.utils.g711 import resolve_g711_encoding, wrap_g711_as_wav
 
 logger = logging.getLogger(__name__)
 HTTP_DISCONNECT_POLL_INTERVAL_S = 0.05
@@ -86,10 +87,14 @@ async def parse_speech_to_text_form(
 
 
 async def read_and_validate_speech_to_text_audio(file: UploadFile) -> bytes:
-    """Reject empty uploads before dispatch can consume backend resources."""
+    """Reject empty uploads, then give headerless uploads a container."""
     audio_bytes = await file.read()
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Uploaded audio file is empty")
+
+    g711_encoding = resolve_g711_encoding(file.content_type, file.filename)
+    if g711_encoding is not None:
+        audio_bytes = wrap_g711_as_wav(audio_bytes, g711_encoding)
     return audio_bytes
 
 
