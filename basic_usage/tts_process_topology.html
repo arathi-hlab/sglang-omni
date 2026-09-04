@@ -525,6 +525,11 @@ config.</p>
 <span class="w">    </span><span class="nt">process</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">pipeline</span>
 </pre></div>
 </div>
+<p>MOSS-TTS delay ships the isolated layout as its default, with declared GPU
+memory fractions 0.10 / 0.72 / 0.18 for <code class="docutils literal notranslate"><span class="pre">preprocessing</span></code>, <code class="docutils literal notranslate"><span class="pre">tts_engine</span></code> and
+<code class="docutils literal notranslate"><span class="pre">vocoder</span></code>. <code class="docutils literal notranslate"><span class="pre">config_cls:</span> <span class="pre">MossTTSSingleProcessPipelineConfig</span></code> selects the
+single-process variant, which the bounded 24 GB and 32 GB configurations and
+the MPS DP2 recipe pin because their measured budgets describe that layout.</p>
 <section id="changing-placement-at-launch">
 <h2>Changing Placement at Launch<a class="headerlink" href="#changing-placement-at-launch" title="Link to this heading">#</a></h2>
 <p>The same field is set from the command line with the dotted spelling, without
