@@ -143,13 +143,3 @@ def wrap_g711_as_wav(
         + padding
     )
     return b"RIFF" + struct.pack("<I", len(body)) + body
-
-
-def normalize_declared_g711(
-    data: bytes, content_type: str | None, filename: str | None = None
-) -> bytes:
-    """Wrap the bytes in a WAV container when the caller declared raw G.711."""
-    encoding = resolve_g711_encoding(content_type, filename)
-    if encoding is None:
-        return data
-    return wrap_g711_as_wav(data, encoding)

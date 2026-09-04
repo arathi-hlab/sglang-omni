@@ -411,11 +411,11 @@ _DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
 
 def test_load_audio_decodes_the_8khz_telephony_fixtures() -> None:
-    from sglang_omni.utils.g711 import normalize_declared_g711
+    from sglang_omni.utils.g711 import wrap_g711_as_wav
 
     original = load_audio((_DATA_DIR / "query_to_draw.wav").read_bytes())
     raw = (_DATA_DIR / "query_to_draw_8k.ulaw").read_bytes()
-    from_raw = load_audio(normalize_declared_g711(raw, "audio/basic"))
+    from_raw = load_audio(wrap_g711_as_wav(raw, "mulaw"))
     from_wav = load_audio((_DATA_DIR / "query_to_draw_8k_ulaw.wav").read_bytes())
 
     assert from_raw.shape == from_wav.shape == original.shape

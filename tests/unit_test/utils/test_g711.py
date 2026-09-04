@@ -13,14 +13,13 @@ from sglang_omni.utils.g711 import (
     ALAW,
     MULAW,
     decode_g711,
-    normalize_declared_g711,
     resolve_g711_encoding,
     wrap_g711_as_wav,
 )
 
 
 def _reference_table(encoding: str) -> np.ndarray:
-    # Note (Jeffro)audioop ships the reference G.711 tables until Python 3.13 removes it the project pins <3.13, 
+    # Note (Jeffro)audioop ships the reference G.711 tables until Python 3.13 removes it the project pins <3.13,
     # so we compare against it while we can.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
@@ -115,12 +114,3 @@ def test_wrap_leaves_existing_wav_untouched() -> None:
 def test_wrap_rejects_unknown_encoding() -> None:
     with pytest.raises(ValueError, match="Unsupported G.711 encoding"):
         wrap_g711_as_wav(b"\x00", "pcm16")
-
-
-def test_normalize_only_touches_declared_g711() -> None:
-    raw = b"\x7f" * 16
-
-    assert normalize_declared_g711(raw, "audio/mpeg", "song.mp3") is raw
-    assert normalize_declared_g711(raw, None, None) is raw
-    assert normalize_declared_g711(raw, "audio/basic", None)[:4] == b"RIFF"
-    assert normalize_declared_g711(raw, None, "call.alaw")[20:22] == b"\x06\x00"
