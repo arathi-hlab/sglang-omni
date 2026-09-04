@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 
 from sglang.srt.utils import hf_transformers_utils
@@ -64,14 +65,14 @@ def test_thinker_loads_tokenizer_from_checkpoint_root(monkeypatch, tmp_path) -> 
         hf_generation_config=SimpleNamespace(),
     )
     tokenizer_calls: list[tuple[str, str | None]] = []
+    scheduler_signature = inspect.signature(omni_scheduler.OmniScheduler)
+    scheduler_kwargs: dict[str, object] = {}
 
     monkeypatch.setattr(
         scheduling_bootstrap,
         "create_sglang_infrastructure",
         lambda *args, **kwargs: (
             SimpleNamespace(),
-            object(),
-            object(),
             object(),
             object(),
             object(),
@@ -101,8 +102,15 @@ def test_thinker_loads_tokenizer_from_checkpoint_root(monkeypatch, tmp_path) -> 
         "SGLangOutputProcessor",
         lambda **kwargs: object(),
     )
-    monkeypatch.setattr(omni_scheduler, "OmniScheduler", SimpleNamespace)
+
+    def fake_scheduler(*args, **kwargs):
+        scheduler_signature.bind(*args, **kwargs)
+        scheduler_kwargs.update(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(omni_scheduler, "OmniScheduler", fake_scheduler)
 
     bootstrap.create_thinker_scheduler(server_args)
 
     assert tokenizer_calls == [(str(tmp_path), "cosmos-revision")]
+    assert scheduler_kwargs["model_config"] is model_config

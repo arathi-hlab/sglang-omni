@@ -90,8 +90,6 @@ def create_thinker_scheduler(
         tree_cache,
         req_to_token_pool,
         token_to_kv_pool_allocator,
-        prefill_manager,
-        decode_manager,
         model_config,
     ) = create_sglang_infrastructure(
         server_args,
@@ -137,8 +135,6 @@ def create_thinker_scheduler(
         token_to_kv_pool_allocator=token_to_kv_pool_allocator,
         server_args=server_args,
         model_config=model_config,
-        prefill_manager=prefill_manager,
-        decode_manager=decode_manager,
         model_runner=model_runner,
         request_builder=request_builder,
         result_adapter=result_adapter,
