@@ -158,6 +158,19 @@ jobs:
       IMAGE_TAG: sglang-omni-xpu-ci:${{ github.event.pull_request.number || github.run_id }}-${{ needs.preflight.outputs.exact_sha }}
       CONTAINER_NAME: ci_omni_xpu_${{ github.event.pull_request.number || github.run_id }}_${{ github.run_attempt }}
     steps:
+      - name: Reclaim workspace from prior runs
+        # Clear root-owned debris from prior rootful containers so
+        # actions/checkout does not EACCES on unlink.
+        shell: bash
+        run: |
+          set -eux
+          if [[ -d "${GITHUB_WORKSPACE}" ]]; then
+            sudo -n chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}" 2>/dev/null \
+              || docker run --rm -v "${GITHUB_WORKSPACE}:/w" --workdir /w alpine \
+                   sh -c "chown -R $(id -u):$(id -g) ."
+            find "${GITHUB_WORKSPACE}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          fi
+
       - name: Checkout PR code
         uses: actions/checkout@v4
         with:
