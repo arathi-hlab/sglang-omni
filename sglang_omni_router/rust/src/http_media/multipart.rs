@@ -308,22 +308,31 @@ mod tests {
     #[test]
     fn accepts_metadata_in_any_order_and_ignores_boundary_like_file_bytes() {
         let file = b"RIFF\r\n--route-boundary-not-a-delimiter\0audio";
-        for parts in [
-            vec![
-                ("model", None, b"asr".as_slice()),
-                ("file", Some("audio/wav"), file.as_slice()),
-                ("response_format", None, b"text".as_slice()),
-            ],
-            vec![
-                ("file", Some("audio/wav"), file.as_slice()),
-                ("stream", None, b"true".as_slice()),
-                ("model", None, b"asr".as_slice()),
-            ],
+        for (parts, response_format, stream) in [
+            (
+                vec![
+                    ("model", None, b"asr".as_slice()),
+                    ("file", Some("audio/wav"), file.as_slice()),
+                    ("response_format", None, b"text".as_slice()),
+                ],
+                Some("text"),
+                None,
+            ),
+            (
+                vec![
+                    ("file", Some("audio/wav"), file.as_slice()),
+                    ("stream", None, b"true".as_slice()),
+                    ("model", None, b"asr".as_slice()),
+                ],
+                None,
+                Some(true),
+            ),
         ] {
             let facts = scan(&body(&parts, true), b"route-boundary")
                 .expect("valid complete multipart body");
             assert_eq!(facts.model.as_deref(), Some("asr"));
-            assert_eq!(facts.model.as_deref(), Some("asr"));
+            assert_eq!(facts.response_format.as_deref(), response_format);
+            assert_eq!(facts.stream, stream);
         }
     }
 
