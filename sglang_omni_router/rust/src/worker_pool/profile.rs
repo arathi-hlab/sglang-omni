@@ -852,11 +852,8 @@ impl ServiceProfile {
                     && response_format.is_none_or(|format| response_formats.contains(&format))
                     && stream_modes.contains(stream_mode)
                     && task.is_none_or(|task| tasks.contains(&task))
-                    && if *required_voice {
-                        *managed_voice
-                    } else {
-                        contains_all(reference_forms, required_references)
-                    }
+                    && (!*required_voice || *managed_voice)
+                    && contains_all(reference_forms, required_references)
             }
             (Self::RealtimeWebsocket, ProfileRequirement::RealtimeWebsocket) => true,
             _ => false,
@@ -1396,7 +1393,7 @@ mod tests {
             reference_forms,
             managed_voice,
         };
-        assert!(row.matches(&requirement(vec![ReferenceForm::None], true), Some("tts")));
+        assert!(row.matches(&requirement(Vec::new(), true), Some("tts")));
         assert!(row.matches(
             &requirement(vec![ReferenceForm::Direct], false),
             Some("tts")
