@@ -623,11 +623,8 @@ impl ServiceProfile {
                     && response_formats.contains(response_format)
                     && stream_modes.contains(stream_mode)
                     && task.is_none_or(|task| tasks.contains(&task))
-                    && if *required_voice {
-                        *managed_voice
-                    } else {
-                        contains_all(reference_forms, required_references)
-                    }
+                    && (!*required_voice || *managed_voice)
+                    && contains_all(reference_forms, required_references)
             }
             (
                 Self::SpeechBatch {
@@ -655,11 +652,8 @@ impl ServiceProfile {
                 }) && *batch_size <= *max_batch_size
                     && contains_all(response_formats, required_formats)
                     && contains_all(tasks, required_tasks)
-                    && if *required_voice {
-                        *managed_voice
-                    } else {
-                        contains_all(reference_forms, required_references)
-                    }
+                    && (!*required_voice || *managed_voice)
+                    && contains_all(reference_forms, required_references)
             }
             (
                 Self::TranscriptionHttp {
@@ -1094,11 +1088,40 @@ mod tests {
             reference_forms,
             managed_voice,
         };
-        assert!(row.matches(&requirement(vec![ReferenceForm::None], true), Some("tts")));
+        assert!(row.matches(&requirement(Vec::new(), true), Some("tts")));
         assert!(row.matches(
             &requirement(vec![ReferenceForm::Direct], false),
             Some("tts")
         ));
         assert!(!row.matches(&requirement(vec![ReferenceForm::None], false), Some("tts")));
+    }
+
+    #[test]
+    fn speech_batch_combines_managed_voice_and_reference_requirements() {
+        let mut row = ServiceProfile::SpeechBatch {
+            model_ids: vec![String::from("tts")],
+            response_formats: vec![SpeechResponseFormat::Wav],
+            tasks: vec![SpeechTask::TextToSpeech],
+            reference_forms: vec![ReferenceForm::None],
+            managed_voice: true,
+            max_batch_size: 2,
+        };
+        let requirement = ProfileRequirement::SpeechBatch {
+            models: vec![ModelSelection::Explicit(String::from("tts"))],
+            response_formats: vec![SpeechResponseFormat::Wav],
+            tasks: vec![SpeechTask::TextToSpeech],
+            reference_forms: vec![ReferenceForm::Direct],
+            managed_voice: true,
+            batch_size: 2,
+        };
+        assert!(!row.matches(&requirement, Some("tts")));
+        let ServiceProfile::SpeechBatch {
+            reference_forms, ..
+        } = &mut row
+        else {
+            unreachable!()
+        };
+        reference_forms.push(ReferenceForm::Direct);
+        assert!(row.matches(&requirement, Some("tts")));
     }
 }

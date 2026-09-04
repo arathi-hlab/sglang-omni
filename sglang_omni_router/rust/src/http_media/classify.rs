@@ -70,8 +70,11 @@ pub(super) fn speech_with_hints(
         .and_then(Option::as_deref)
         .map(|value| classify_task(value).ok_or(HttpFault::MalformedRequest))
         .transpose()?;
-    let references = reference_forms(&fields);
+    let mut references = reference_forms(&fields);
     let managed_voice = classify_managed_voice(&fields, &references);
+    if managed_voice {
+        references.clear();
+    }
     Ok(Classified {
         requirement: RouteRequirement::new(
             ProfileRequirement::SpeechHttp {
@@ -132,8 +135,7 @@ pub(super) fn batch_with_hints(
         .and_then(Option::as_deref)
         .map(|value| classify_task(value).ok_or(HttpFault::MalformedRequest))
         .transpose()?;
-    let default_references = reference_forms(&defaults);
-    let mut managed_voice = classify_managed_voice(&defaults, &default_references);
+    let mut managed_voice = false;
     for item in items {
         let effective_model = item
             .model
@@ -170,17 +172,21 @@ pub(super) fn batch_with_hints(
         }
         let effective_references = effective_reference_forms(&defaults, &item);
         let explicit_reference = effective_references != [ReferenceForm::None];
-        for form in effective_references {
-            insert_once(&mut references, form);
-        }
         let voice = item
             .voice
             .clone()
             .flatten()
             .or_else(|| defaults.voice.clone().flatten());
-        managed_voice |= !explicit_reference
+        let item_managed_voice = !explicit_reference
             && voice
                 .is_some_and(|value| !value.is_empty() && !value.eq_ignore_ascii_case("default"));
+        if item_managed_voice {
+            managed_voice = true;
+        } else {
+            for form in effective_references {
+                insert_once(&mut references, form);
+            }
+        }
     }
     let batch_size = u16::try_from(models.len()).map_err(|_| HttpFault::MalformedRequest)?;
     Ok(Classified {
@@ -670,6 +676,28 @@ stream_modes = ["non_streaming", "streaming"]
     }
 
     #[test]
+    fn managed_speech_uses_voice_as_its_reference_requirement() {
+        let pool = pool();
+        let trust = TrustDomain::new(String::from("local"));
+        let classified = speech(
+            br#"{"model":"tts","input":"x","voice":"named"}"#,
+            &pool,
+            &trust,
+        )
+        .expect("classify managed speech");
+        let ProfileRequirement::SpeechHttp {
+            reference_forms,
+            managed_voice,
+            ..
+        } = classified.requirement.profile()
+        else {
+            panic!("speech requirement")
+        };
+        assert!(reference_forms.is_empty());
+        assert!(*managed_voice);
+    }
+
+    #[test]
     fn batch_builds_whole_ordered_effective_unions() {
         let pool = pool();
         let trust = TrustDomain::new(String::from("local"));
@@ -719,7 +747,7 @@ stream_modes = ["non_streaming", "streaming"]
     }
 
     #[test]
-    fn batch_default_named_voice_is_required_before_item_reference_overrides() {
+    fn batch_default_named_voice_is_ignored_when_every_item_overrides_it() {
         let pool = pool();
         let trust = TrustDomain::new(String::from("local"));
         let body = br#"{
@@ -730,12 +758,52 @@ stream_modes = ["non_streaming", "streaming"]
                 {"input":"second","references":[{"audio":"list"}]}
             ]
         }"#;
-        let classified = batch(body, &pool, &trust).expect("classify default managed voice");
-        let ProfileRequirement::SpeechBatch { managed_voice, .. } =
-            classified.requirement.profile()
+        let classified = batch(body, &pool, &trust).expect("classify overridden default voice");
+        let ProfileRequirement::SpeechBatch {
+            reference_forms,
+            managed_voice,
+            ..
+        } = classified.requirement.profile()
         else {
             panic!("batch requirement")
         };
+        assert_eq!(
+            reference_forms,
+            &[ReferenceForm::Direct, ReferenceForm::List]
+        );
+        assert!(!managed_voice);
+    }
+
+    #[test]
+    fn batch_combines_managed_and_external_reference_requirements() {
+        let pool = pool();
+        let trust = TrustDomain::new(String::from("local"));
+        let classified = batch(
+            br#"{
+                "model":"tts",
+                "voice":"named-default",
+                "items":[
+                    {"input":"managed"},
+                    {"input":"direct","ref_audio":"reference"},
+                    {"input":"plain","voice":"default"}
+                ]
+            }"#,
+            &pool,
+            &trust,
+        )
+        .expect("classify mixed managed batch");
+        let ProfileRequirement::SpeechBatch {
+            reference_forms,
+            managed_voice,
+            ..
+        } = classified.requirement.profile()
+        else {
+            panic!("batch requirement")
+        };
+        assert_eq!(
+            reference_forms,
+            &[ReferenceForm::Direct, ReferenceForm::None]
+        );
         assert!(*managed_voice);
     }
 
