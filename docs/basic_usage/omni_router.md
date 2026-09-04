@@ -264,14 +264,14 @@ type and order without relay tasks or application queues. Setup, connection,
 initial speech configuration, and close convergence use explicit bounds.
 Application-level idle behavior remains worker-owned.
 
-Managed voices have one explicit owner configured by
+Uploaded voices have one explicit owner configured by
 `router.voice_owner_worker_id`. Voice CRUD and requests that depend on a stored
 voice are pinned to that worker. Stateless speech continues to use normal
 worker selection. The router does not store, replicate, or reconcile
 worker-local voice data. `voice_name_policy = "preset"` declares names provided
 by the serving model. `voice_name_policy = "uploaded"` declares names resolved
 from worker-local voice state; hybrid pipelines should use `uploaded` so named
-requests are routed conservatively. An omitted-model request is rejected when
+requests are routed conservatively. A named-voice request is rejected when
 otherwise compatible profiles disagree on this policy.
 Qwen3-TTS CustomVoice profiles use `preset`; Qwen3-TTS Base, Higgs, and hybrid
 dots-style profiles use `uploaded`.
@@ -285,7 +285,7 @@ probe. Application responses do not directly change worker health.
 
 `GET /ready` returns `200` while the process is serving and every enabled
 generation, media, and WebSocket service has a compatible healthy worker.
-Readiness also requires the configured managed-voice owner to be healthy and
+Readiness also requires the configured uploaded-voice owner to be healthy and
 compatible. Current worker load does not change readiness.
 
 ## Operations
