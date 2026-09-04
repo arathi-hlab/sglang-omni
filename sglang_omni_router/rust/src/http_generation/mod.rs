@@ -120,12 +120,11 @@ async fn handle(
             deadline,
         )
         .await?;
-    let classify_pool = Arc::clone(&generation.pool);
     let classify_trust = generation.trust.clone();
     let (upload, classified) = generation
         .relay
         .classify(deadline, move || {
-            let classified = classify(&upload.bytes, &classify_pool, &classify_trust)?;
+            let classified = classify(&upload.bytes, &classify_trust)?;
             Ok((upload, classified))
         })
         .await?;

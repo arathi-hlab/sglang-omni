@@ -219,7 +219,6 @@ async fn handle(
     let boundary = framing.boundary;
     let route_model = framing.route_model;
     let route_stream = framing.route_stream;
-    let classify_pool = Arc::clone(&media.pool);
     let classify_trust = media.trust.clone();
     let (upload, classified) = media
         .relay
@@ -230,7 +229,6 @@ async fn handle(
                 boundary.as_deref(),
                 route_model.as_deref(),
                 route_stream,
-                &classify_pool,
                 &classify_trust,
             )?;
             Ok((upload, classified))
@@ -272,22 +270,20 @@ fn classify(
     boundary: Option<&[u8]>,
     route_model: Option<&str>,
     route_stream: Option<bool>,
-    pool: &WorkerPool,
     trust: &TrustDomain,
 ) -> Result<Classified, HttpFault> {
     match route {
         HttpMediaRoute::Speech => {
-            classify::speech_with_hints(bytes, route_model, route_stream, pool, trust)
+            classify::speech_with_hints(bytes, route_model, route_stream, trust)
         }
         HttpMediaRoute::SpeechBatch => {
-            classify::batch_with_hints(bytes, route_model, route_stream, pool, trust)
+            classify::batch_with_hints(bytes, route_model, route_stream, trust)
         }
         HttpMediaRoute::Transcription => classify::transcription_with_hints(
             bytes,
             boundary.ok_or(HttpFault::UnsupportedMediaType)?,
             route_model,
             route_stream,
-            pool,
             trust,
         ),
         HttpMediaRoute::Translation => classify::translation_with_hints(
@@ -295,7 +291,6 @@ fn classify(
             boundary.ok_or(HttpFault::UnsupportedMediaType)?,
             route_model,
             route_stream,
-            pool,
             trust,
         ),
     }

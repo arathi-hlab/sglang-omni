@@ -352,6 +352,7 @@ pub(crate) const fn map_admission(error: AdmissionError) -> HttpFault {
 
 pub(crate) const fn map_dispatch(error: DispatchError) -> HttpFault {
     match error {
+        DispatchError::AmbiguousModel => HttpFault::AmbiguousModel,
         DispatchError::NoEligibleProfile => HttpFault::NoCompatibleWorker,
         DispatchError::Unavailable => HttpFault::RouterUnavailable,
         DispatchError::Internal => HttpFault::InternalError,

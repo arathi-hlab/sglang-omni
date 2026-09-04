@@ -5,8 +5,8 @@ use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use crate::error::HttpFault;
 use crate::worker_pool::profile::{InputModality, OutputModality, StreamMode};
 use crate::worker_pool::{
-    ChatAudioFormat, DefaultModelResolution, MediaPlacement, MessageContentForm, ModelSelection,
-    ProfileRequirement, RouteRequirement, ServiceClass, TrustDomain, WorkerPool,
+    ChatAudioFormat, MediaPlacement, MessageContentForm, ModelSelection, ProfileRequirement,
+    RouteRequirement, TrustDomain,
 };
 
 /// Worker-eligibility facts derived without reconstructing the request body.
@@ -38,11 +38,7 @@ struct MessageFacts {
 }
 
 /// Extracts routing facts while leaving worker-owned request validation upstream.
-pub(crate) fn classify(
-    bytes: &[u8],
-    pool: &WorkerPool,
-    trust: &TrustDomain,
-) -> Result<ClassifiedRequest, HttpFault> {
+pub(crate) fn classify(bytes: &[u8], trust: &TrustDomain) -> Result<ClassifiedRequest, HttpFault> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let facts = RootSeed
         .deserialize(&mut deserializer)
@@ -52,16 +48,10 @@ pub(crate) fn classify(
         .map_err(|_| HttpFault::MalformedRequest)?;
 
     let messages = facts.messages.unwrap_or_default();
-    let model = match facts.model.flatten() {
-        Some(model) => ModelSelection::Explicit(model),
-        None => match pool.resolve_default_model_id(trust, ServiceClass::GenerationHttp, None) {
-            DefaultModelResolution::Unique(model) => ModelSelection::WorkerDefault {
-                expected_model_id: model.to_owned(),
-            },
-            DefaultModelResolution::Ambiguous => return Err(HttpFault::AmbiguousModel),
-            DefaultModelResolution::NoService => return Err(HttpFault::RouterUnavailable),
-        },
-    };
+    let model = facts
+        .model
+        .flatten()
+        .map_or(ModelSelection::UnresolvedDefault, ModelSelection::Explicit);
 
     let mut message_content_forms = Vec::with_capacity(2);
     if messages.string {
@@ -892,7 +882,7 @@ fn parse_audio_format(value: &str) -> Option<ChatAudioFormat> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use std::fs;
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -901,7 +891,7 @@ mod tests {
     use http_body::Body as _;
 
     use crate::config::Config;
-    use crate::worker_pool::WorkerPool;
+    use crate::worker_pool::{ModelSelection, ProfileRequirement, WorkerPool};
 
     use super::{ClassifiedRequest, HttpFault, TrustDomain, classify};
 
@@ -960,8 +950,8 @@ stream_modes = ["non_streaming", "streaming"]
         classify_full(body.as_bytes(), pool).map(drop)
     }
 
-    fn classify_full(bytes: &[u8], pool: &WorkerPool) -> Result<ClassifiedRequest, HttpFault> {
-        classify(bytes, pool, &TrustDomain::new(String::from("local")))
+    fn classify_full(bytes: &[u8], _pool: &WorkerPool) -> Result<ClassifiedRequest, HttpFault> {
+        classify(bytes, &TrustDomain::new(String::from("local")))
     }
 
     fn permutations(fields: &mut [&str], index: usize, output: &mut Vec<String>) {
@@ -1121,7 +1111,7 @@ stream_modes = ["non_streaming", "streaming"]
     }
 
     #[test]
-    fn ignored_nesting_is_iterative_and_ambiguous_defaults_fail_closed() {
+    fn ignored_nesting_is_iterative_and_default_resolution_is_deferred() {
         let base_pool = pool("");
         let nested = format!(
             "{{\"messages\":[{{\"content\":\"x\"}}],\"ignored\":{}0{}}}",
@@ -1146,10 +1136,13 @@ chat_audio_formats = ["wav", "mp3", "flac", "pcm", "aac", "opus"]
 stream_modes = ["non_streaming", "streaming"]
 "#;
         let ambiguous = pool(second);
-        assert_eq!(
-            classify_with(r#"{"messages":[{"content":"x"}]}"#, &ambiguous),
-            Err(HttpFault::AmbiguousModel)
-        );
+        let classified = classify_full(br#"{"messages":[{"content":"x"}]}"#, &ambiguous)
+            .expect("classification defers default resolution to dispatch");
+        let ProfileRequirement::GenerationHttp { model, .. } = classified.requirement.profile()
+        else {
+            panic!("generation requirement")
+        };
+        assert!(matches!(model, ModelSelection::UnresolvedDefault));
         assert!(
             classify_with(
                 r#"{"model":"omni","messages":[{"content":"x"}]}"#,

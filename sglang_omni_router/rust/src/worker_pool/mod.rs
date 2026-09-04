@@ -92,13 +92,6 @@ struct HomogeneousMediaCohort {
     task: Option<SpeechToTextTask>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DefaultModelResolution<'a> {
-    NoService,
-    Unique(&'a str),
-    Ambiguous,
-}
-
 /// Startup proof that chat body inspection cannot change the route cohort.
 pub(crate) struct ContentBlindGenerationHttp<'a> {
     pool: &'a WorkerPool,
@@ -210,15 +203,31 @@ impl WorkerPool {
         admission: AdmissionLease,
         requirement: &RouteRequirement,
     ) -> Result<RequestLease, DispatchError> {
+        if admission.class() != requirement.capacity_class() {
+            return Err(DispatchError::Internal);
+        }
         let mut matching = [false; MAX_WORKERS];
         for (index, record) in self.records.iter().enumerate() {
             matching[index] = &record.trust_domain == requirement.trust_domain()
                 && record.has_profile(requirement);
         }
-        if admission.class() != requirement.capacity_class() {
-            return Err(DispatchError::Internal);
-        }
         let profile_found = matching[..self.records.len()].contains(&true);
+        if profile_found && requirement.profile.requires_default_resolution() {
+            let mut resolved = None;
+            for (index, record) in self.records.iter().enumerate() {
+                if !matching[index] {
+                    continue;
+                }
+                let Some(model_id) = record.default_model_id.as_deref() else {
+                    return Err(DispatchError::AmbiguousModel);
+                };
+                match resolved {
+                    None => resolved = Some(model_id),
+                    Some(expected) if expected == model_id => {}
+                    Some(_) => return Err(DispatchError::AmbiguousModel),
+                }
+            }
+        }
         self.dispatch_matching(admission, profile_found, |record| {
             matching[record.registration_id.startup_ordinal()]
         })
@@ -285,45 +294,6 @@ impl WorkerPool {
         selector
             .select(&candidates)
             .map(|index| Arc::clone(&self.records[index]))
-    }
-
-    pub(crate) fn resolve_default_model_id(
-        &self,
-        trust: &TrustDomain,
-        service: ServiceClass,
-        task: Option<SpeechToTextTask>,
-    ) -> DefaultModelResolution<'_> {
-        let mut resolved = None;
-        for record in &self.records {
-            if &record.trust_domain != trust
-                || !record.profiles.iter().any(|profile| {
-                    profile.service_class() == service
-                        && match (profile, task) {
-                            (
-                                ServiceProfile::TranscriptionHttp { task: row_task, .. },
-                                Some(required),
-                            ) => *row_task == required,
-                            (ServiceProfile::TranscriptionHttp { .. }, None) => false,
-                            (_, None) => true,
-                            (_, Some(_)) => false,
-                        }
-                })
-            {
-                continue;
-            }
-            let Some(default) = record.default_model_id.as_deref() else {
-                return DefaultModelResolution::Ambiguous;
-            };
-            match resolved {
-                None => resolved = Some(default),
-                Some(current) if current == default => {}
-                Some(_) => return DefaultModelResolution::Ambiguous,
-            }
-        }
-        resolved.map_or(
-            DefaultModelResolution::NoService,
-            DefaultModelResolution::Unique,
-        )
     }
 
     pub(crate) fn content_blind_generation_http(
@@ -584,6 +554,21 @@ mod tests {
             output_modalities: vec![OutputModality::Text],
             chat_audio_formats: Vec::new(),
             stream_modes: vec![StreamMode::NonStreaming],
+        }
+    }
+
+    fn speech_http_profile(
+        model: &str,
+        response_format: SpeechResponseFormat,
+        stream_mode: StreamMode,
+    ) -> ServiceProfile {
+        ServiceProfile::SpeechHttp {
+            model_ids: vec![model.to_owned()],
+            response_formats: vec![response_format],
+            stream_modes: vec![stream_mode],
+            tasks: vec![SpeechTask::TextToSpeech],
+            reference_forms: vec![ReferenceForm::None],
+            managed_voice: false,
         }
     }
 
@@ -971,8 +956,8 @@ mod tests {
     }
 
     #[test]
-    fn heterogeneous_default_model_routes_to_the_correlated_capable_worker() {
-        let mut multimodal = profile("omni");
+    fn unresolved_default_routes_to_the_only_compatible_worker() {
+        let mut multimodal = profile("vision");
         if let ServiceProfile::GenerationHttp {
             message_content_forms,
             media_placements,
@@ -987,16 +972,14 @@ mod tests {
         let pool = pool(
             RoutingStrategy::RoundRobin,
             vec![
-                record(0, "local", "omni"),
-                record_with_profile(1, "local", "omni", multimodal),
+                record(0, "local", "text"),
+                record_with_profile(1, "local", "vision", multimodal),
             ],
             2,
         );
         let requirement = RouteRequirement::new(
             ProfileRequirement::GenerationHttp {
-                model: ModelSelection::WorkerDefault {
-                    expected_model_id: String::from("omni"),
-                },
+                model: ModelSelection::UnresolvedDefault,
                 message_content_forms: vec![MessageContentForm::TypedParts],
                 media_placements: vec![MediaPlacement::TypedParts],
                 input_modalities: vec![InputModality::Text, InputModality::Image],
@@ -1013,6 +996,78 @@ mod tests {
                 &requirement,
             )
             .expect("dispatch heterogeneous default");
+        assert_eq!(lease.registration_ordinal(), 1);
+    }
+
+    #[test]
+    fn unresolved_default_agreement_is_stable_across_health_changes() {
+        let records = vec![record(0, "local", "first"), record(1, "local", "second")];
+        records[1].health.store(WorkerHealth::Unhealthy);
+        let pool = pool(RoutingStrategy::RoundRobin, records, 2);
+        let requirement = RouteRequirement::new(
+            ProfileRequirement::GenerationHttp {
+                model: ModelSelection::UnresolvedDefault,
+                message_content_forms: vec![MessageContentForm::String],
+                media_placements: Vec::new(),
+                input_modalities: vec![InputModality::Text],
+                output_modalities: vec![OutputModality::Text],
+                audio_format: None,
+                stream_mode: StreamMode::NonStreaming,
+            },
+            TrustDomain::new(String::from("local")),
+        );
+        let result = pool.dispatch(
+            pool.try_admit(CapacityClass::GenerationHttp, 1)
+                .expect("admit unresolved request"),
+            &requirement,
+        );
+        assert!(matches!(result, Err(DispatchError::AmbiguousModel)));
+    }
+
+    #[test]
+    fn media_default_resolution_uses_format_and_stream_constraints() {
+        let records = vec![
+            record_with_profile(
+                0,
+                "local",
+                "wav-model",
+                speech_http_profile(
+                    "wav-model",
+                    SpeechResponseFormat::Wav,
+                    StreamMode::NonStreaming,
+                ),
+            ),
+            record_with_profile(
+                1,
+                "local",
+                "pcm-model",
+                speech_http_profile(
+                    "pcm-model",
+                    SpeechResponseFormat::Pcm,
+                    StreamMode::Streaming,
+                ),
+            ),
+        ];
+        let mut pool = pool(RoutingStrategy::RoundRobin, records, 2);
+        pool.admission = AdmissionController::new(2, [None, Some(2), None, None]);
+        let requirement = RouteRequirement::new(
+            ProfileRequirement::SpeechHttp {
+                model: ModelSelection::UnresolvedDefault,
+                response_format: SpeechResponseFormat::Pcm,
+                stream_mode: StreamMode::Streaming,
+                task: Some(SpeechTask::TextToSpeech),
+                reference_forms: vec![ReferenceForm::None],
+                managed_voice: false,
+            },
+            TrustDomain::new(String::from("local")),
+        );
+        let lease = pool
+            .dispatch(
+                pool.try_admit(CapacityClass::SpeechHttp, 1)
+                    .expect("admit speech request"),
+                &requirement,
+            )
+            .expect("dispatch compatible default");
         assert_eq!(lease.registration_ordinal(), 1);
     }
 

@@ -9,9 +9,8 @@ use crate::speech_facts::{
     task as classify_task,
 };
 use crate::worker_pool::{
-    DefaultModelResolution, ModelSelection, ProfileRequirement, ReferenceForm, RouteRequirement,
-    ServiceClass, SpeechResponseFormat, SpeechToTextTask, StreamMode, TranscriptionResponseFormat,
-    TrustDomain, WorkerPool,
+    ModelSelection, ProfileRequirement, ReferenceForm, RouteRequirement, SpeechResponseFormat,
+    SpeechToTextTask, StreamMode, TranscriptionResponseFormat, TrustDomain,
 };
 
 use super::multipart;
@@ -24,28 +23,20 @@ pub(super) struct Classified {
 #[cfg(test)]
 pub(super) fn speech(
     bytes: &[u8],
-    pool: &WorkerPool,
+    _pool: &crate::worker_pool::WorkerPool,
     trust: &TrustDomain,
 ) -> Result<Classified, HttpFault> {
-    speech_with_hints(bytes, None, None, pool, trust)
+    speech_with_hints(bytes, None, None, trust)
 }
 
 pub(super) fn speech_with_hints(
     bytes: &[u8],
     route_model: Option<&str>,
     route_stream: Option<bool>,
-    pool: &WorkerPool,
     trust: &TrustDomain,
 ) -> Result<Classified, HttpFault> {
     let fields = parse_speech(bytes)?;
-    let model = model_selection(
-        fields.model.clone().flatten(),
-        route_model,
-        pool,
-        trust,
-        ServiceClass::SpeechHttp,
-        None,
-    )?;
+    let model = model_selection(fields.model.clone().flatten(), route_model)?;
     let format = classify_response_format(
         fields
             .response_format
@@ -94,17 +85,16 @@ pub(super) fn speech_with_hints(
 #[cfg(test)]
 pub(super) fn batch(
     bytes: &[u8],
-    pool: &WorkerPool,
+    _pool: &crate::worker_pool::WorkerPool,
     trust: &TrustDomain,
 ) -> Result<Classified, HttpFault> {
-    batch_with_hints(bytes, None, None, pool, trust)
+    batch_with_hints(bytes, None, None, trust)
 }
 
 pub(super) fn batch_with_hints(
     bytes: &[u8],
     route_model: Option<&str>,
     route_stream: Option<bool>,
-    pool: &WorkerPool,
     trust: &TrustDomain,
 ) -> Result<Classified, HttpFault> {
     let (defaults, items) = parse_batch(bytes)?;
@@ -142,14 +132,7 @@ pub(super) fn batch_with_hints(
             .clone()
             .flatten()
             .or_else(|| defaults.model.clone().flatten());
-        models.push(model_selection(
-            effective_model,
-            route_model,
-            pool,
-            trust,
-            ServiceClass::SpeechBatch,
-            None,
-        )?);
+        models.push(model_selection(effective_model, route_model)?);
         match item.response_format.as_ref().and_then(Option::as_deref) {
             Some(value) => {
                 if let Some(format) = classify_response_format(value) {
@@ -210,7 +193,6 @@ pub(super) fn transcription_with_hints(
     boundary: &[u8],
     route_model: Option<&str>,
     route_stream: Option<bool>,
-    pool: &WorkerPool,
     trust: &TrustDomain,
 ) -> Result<Classified, HttpFault> {
     speech_to_text(
@@ -218,7 +200,6 @@ pub(super) fn transcription_with_hints(
         boundary,
         route_model,
         route_stream,
-        pool,
         trust,
         SpeechToTextTask::Transcribe,
     )
@@ -229,7 +210,6 @@ pub(super) fn translation_with_hints(
     boundary: &[u8],
     route_model: Option<&str>,
     route_stream: Option<bool>,
-    pool: &WorkerPool,
     trust: &TrustDomain,
 ) -> Result<Classified, HttpFault> {
     speech_to_text(
@@ -237,7 +217,6 @@ pub(super) fn translation_with_hints(
         boundary,
         route_model,
         route_stream,
-        pool,
         trust,
         SpeechToTextTask::Translate,
     )
@@ -248,19 +227,11 @@ fn speech_to_text(
     boundary: &[u8],
     route_model: Option<&str>,
     route_stream: Option<bool>,
-    pool: &WorkerPool,
     trust: &TrustDomain,
     task: SpeechToTextTask,
 ) -> Result<Classified, HttpFault> {
     let facts = multipart::scan(bytes, boundary)?;
-    let model = model_selection(
-        facts.model,
-        route_model,
-        pool,
-        trust,
-        ServiceClass::TranscriptionHttp,
-        Some(task),
-    )?;
+    let model = model_selection(facts.model, route_model)?;
     let stream = merge_stream(facts.stream, route_stream)?;
     let format = if stream {
         if !matches!(
@@ -314,10 +285,6 @@ fn speech_to_text(
 fn model_selection(
     model: Option<String>,
     route_assertion: Option<&str>,
-    pool: &WorkerPool,
-    trust: &TrustDomain,
-    service: ServiceClass,
-    task: Option<SpeechToTextTask>,
 ) -> Result<ModelSelection, HttpFault> {
     let model = model.filter(|value| !value.is_empty());
     match (model, route_assertion) {
@@ -326,13 +293,7 @@ fn model_selection(
         (None, Some(asserted)) => Ok(ModelSelection::WorkerDefault {
             expected_model_id: asserted.to_owned(),
         }),
-        (None, None) => match pool.resolve_default_model_id(trust, service, task) {
-            DefaultModelResolution::Unique(model) => Ok(ModelSelection::WorkerDefault {
-                expected_model_id: model.to_owned(),
-            }),
-            DefaultModelResolution::Ambiguous => Err(HttpFault::AmbiguousModel),
-            DefaultModelResolution::NoService => Err(HttpFault::RouterUnavailable),
-        },
+        (None, None) => Ok(ModelSelection::UnresolvedDefault),
     }
 }
 
@@ -648,7 +609,7 @@ stream_modes = ["non_streaming", "streaming"]
         let ProfileRequirement::SpeechHttp { model, .. } = duplicate.requirement.profile() else {
             panic!("speech requirement")
         };
-        assert_eq!(model.model_id(), "tts");
+        assert_eq!(model.expected_model_id(), Some("tts"));
     }
 
     #[test]
@@ -722,10 +683,10 @@ stream_modes = ["non_streaming", "streaming"]
             panic!("batch requirement")
         };
         assert_eq!(*batch_size, 3);
-        assert_eq!(models[0].model_id(), "tts");
+        assert_eq!(models[0].expected_model_id(), Some("tts"));
         assert!(matches!(models[0], ModelSelection::Explicit(_)));
-        assert_eq!(models[1].model_id(), "other");
-        assert_eq!(models[2].model_id(), "tts");
+        assert_eq!(models[1].expected_model_id(), Some("other"));
+        assert_eq!(models[2].expected_model_id(), Some("tts"));
         assert_eq!(
             response_formats,
             &[SpeechResponseFormat::Wav, SpeechResponseFormat::Mp3]
@@ -896,19 +857,19 @@ stream_modes = ["non_streaming", "streaming"]
             (
                 br#"{"model":"","input":"x","voice":""}"#.as_slice(),
                 true,
-                "tts",
+                None,
                 false,
             ),
             (
                 br#"{"model":" ","input":"x","voice":" default "}"#.as_slice(),
                 false,
-                " ",
+                Some(" "),
                 true,
             ),
             (
                 br#"{"input":"x","voice":"DeFaUlT"}"#.as_slice(),
                 true,
-                "tts",
+                None,
                 false,
             ),
         ] {
@@ -921,9 +882,9 @@ stream_modes = ["non_streaming", "streaming"]
             else {
                 panic!("speech requirement")
             };
-            assert_eq!(model.model_id(), expected_model);
+            assert_eq!(model.expected_model_id(), expected_model);
             assert_eq!(
-                matches!(model, ModelSelection::WorkerDefault { .. }),
+                matches!(model, ModelSelection::UnresolvedDefault),
                 defaulted
             );
             assert_eq!(*managed_voice, managed);
@@ -944,11 +905,9 @@ stream_modes = ["non_streaming", "streaming"]
 
     #[test]
     fn route_header_assertions_cannot_override_worker_semantics() {
-        let pool = pool();
         let trust = TrustDomain::new(String::from("local"));
-        let asserted =
-            speech_with_hints(br#"{"input":"x"}"#, Some("tts"), Some(false), &pool, &trust)
-                .expect("matching default assertions");
+        let asserted = speech_with_hints(br#"{"input":"x"}"#, Some("tts"), Some(false), &trust)
+            .expect("matching default assertions");
         let ProfileRequirement::SpeechHttp {
             model, stream_mode, ..
         } = asserted.requirement.profile()
@@ -958,14 +917,9 @@ stream_modes = ["non_streaming", "streaming"]
         assert!(matches!(model, ModelSelection::WorkerDefault { .. }));
         assert_eq!(*stream_mode, StreamMode::NonStreaming);
 
-        let empty_asserted = speech_with_hints(
-            br#"{"model":"","input":"x"}"#,
-            Some("tts"),
-            None,
-            &pool,
-            &trust,
-        )
-        .expect("empty model retains default semantics");
+        let empty_asserted =
+            speech_with_hints(br#"{"model":"","input":"x"}"#, Some("tts"), None, &trust)
+                .expect("empty model retains default semantics");
         let ProfileRequirement::SpeechHttp { model, .. } = empty_asserted.requirement.profile()
         else {
             panic!("speech requirement")
@@ -976,7 +930,6 @@ stream_modes = ["non_streaming", "streaming"]
             br#"{"model":"tts","input":"x","stream":true,"response_format":"pcm"}"#,
             Some("tts"),
             Some(true),
-            &pool,
             &trust,
         )
         .expect("matching explicit assertions");
@@ -994,7 +947,6 @@ stream_modes = ["non_streaming", "streaming"]
                 br#"{"model":"tts","input":"x"}"#,
                 Some("other"),
                 None,
-                &pool,
                 &trust,
             )
             .err(),
@@ -1014,7 +966,6 @@ stream_modes = ["non_streaming", "streaming"]
                 br#"{"model":"tts","input":"x","stream":true,"response_format":"wav"}"#,
                 None,
                 None,
-                &pool,
                 &trust,
             )
             .err(),

@@ -275,23 +275,49 @@ pub(crate) enum ProfileRequirement {
 pub(crate) enum ModelSelection {
     Explicit(String),
     WorkerDefault { expected_model_id: String },
+    UnresolvedDefault,
 }
 
 impl ModelSelection {
-    pub(crate) fn model_id(&self) -> &str {
+    #[cfg(test)]
+    pub(crate) fn expected_model_id(&self) -> Option<&str> {
         match self {
-            Self::Explicit(model_id) => model_id,
-            Self::WorkerDefault { expected_model_id } => expected_model_id,
+            Self::Explicit(model_id) => Some(model_id),
+            Self::WorkerDefault { expected_model_id } => Some(expected_model_id),
+            Self::UnresolvedDefault => None,
         }
     }
 
-    fn matches_worker_default(&self, worker_default: Option<&str>) -> bool {
+    fn matches_profile_models(&self, model_ids: &[String], worker_default: Option<&str>) -> bool {
         match self {
-            Self::Explicit(_) => true,
+            Self::Explicit(model_id) => model_ids.iter().any(|candidate| candidate == model_id),
             Self::WorkerDefault { expected_model_id } => {
                 worker_default == Some(expected_model_id.as_str())
+                    && model_ids
+                        .iter()
+                        .any(|candidate| candidate == expected_model_id)
             }
+            Self::UnresolvedDefault => worker_default
+                .is_none_or(|model_id| model_ids.iter().any(|candidate| candidate == model_id)),
         }
+    }
+
+    fn matches_translation(&self, model_ids: &[String], worker_default: Option<&str>) -> bool {
+        match self {
+            Self::Explicit(model_id)
+            | Self::WorkerDefault {
+                expected_model_id: model_id,
+            } => {
+                worker_default == Some(model_id.as_str())
+                    && model_ids.iter().any(|candidate| candidate == model_id)
+            }
+            Self::UnresolvedDefault => worker_default
+                .is_some_and(|model_id| model_ids.iter().any(|candidate| candidate == model_id)),
+        }
+    }
+
+    const fn requires_resolution(&self) -> bool {
+        matches!(self, Self::UnresolvedDefault)
     }
 }
 
@@ -324,6 +350,17 @@ impl ProfileRequirement {
             Self::SpeechHttp { .. } => ServiceClass::SpeechHttp,
             Self::SpeechBatch { .. } => ServiceClass::SpeechBatch,
             Self::TranscriptionHttp { .. } => ServiceClass::TranscriptionHttp,
+        }
+    }
+
+    pub(super) fn requires_default_resolution(&self) -> bool {
+        match self {
+            Self::GenerationHttp { model, .. }
+            | Self::SpeechHttp { model, .. }
+            | Self::TranscriptionHttp { model, .. } => model.requires_resolution(),
+            Self::SpeechBatch { models, .. } => {
+                models.iter().any(ModelSelection::requires_resolution)
+            }
         }
     }
 }
@@ -587,10 +624,7 @@ impl ServiceProfile {
                     stream_mode,
                 },
             ) => {
-                model.matches_worker_default(worker_default)
-                    && model_ids
-                        .iter()
-                        .any(|candidate| candidate == model.model_id())
+                model.matches_profile_models(model_ids, worker_default)
                     && contains_all(message_content_forms, required_forms)
                     && contains_all(media_placements, required_placements)
                     && contains_all(input_modalities, required_inputs)
@@ -616,10 +650,7 @@ impl ServiceProfile {
                     managed_voice: required_voice,
                 },
             ) => {
-                model.matches_worker_default(worker_default)
-                    && model_ids
-                        .iter()
-                        .any(|candidate| candidate == model.model_id())
+                model.matches_profile_models(model_ids, worker_default)
                     && response_formats.contains(response_format)
                     && stream_modes.contains(stream_mode)
                     && task.is_none_or(|task| tasks.contains(&task))
@@ -644,12 +675,10 @@ impl ServiceProfile {
                     batch_size,
                 },
             ) => {
-                models.iter().all(|model| {
-                    model.matches_worker_default(worker_default)
-                        && model_ids
-                            .iter()
-                            .any(|candidate| candidate == model.model_id())
-                }) && *batch_size <= *max_batch_size
+                models
+                    .iter()
+                    .all(|model| model.matches_profile_models(model_ids, worker_default))
+                    && *batch_size <= *max_batch_size
                     && contains_all(response_formats, required_formats)
                     && contains_all(tasks, required_tasks)
                     && (!*required_voice || *managed_voice)
@@ -670,13 +699,10 @@ impl ServiceProfile {
                 },
             ) => {
                 (if *required_task == SpeechToTextTask::Translate {
-                    worker_default == Some(model.model_id())
+                    model.matches_translation(model_ids, worker_default)
                 } else {
-                    model.matches_worker_default(worker_default)
-                }) && model_ids
-                    .iter()
-                    .any(|candidate| candidate == model.model_id())
-                    && task == required_task
+                    model.matches_profile_models(model_ids, worker_default)
+                }) && task == required_task
                     && response_formats.contains(response_format)
                     && stream_modes.contains(stream_mode)
             }
@@ -1041,6 +1067,15 @@ mod tests {
         };
         assert!(!profile(SpeechToTextTask::Transcribe).matches(&requirement, Some("asr")));
         assert!(profile(SpeechToTextTask::Translate).matches(&requirement, Some("asr")));
+
+        let unresolved = ProfileRequirement::TranscriptionHttp {
+            model: ModelSelection::UnresolvedDefault,
+            task: SpeechToTextTask::Translate,
+            response_format: TranscriptionResponseFormat::Json,
+            stream_mode: StreamMode::NonStreaming,
+        };
+        assert!(profile(SpeechToTextTask::Translate).matches(&unresolved, Some("asr")));
+        assert!(!profile(SpeechToTextTask::Translate).matches(&unresolved, None));
 
         let alias = ProfileRequirement::TranscriptionHttp {
             model: ModelSelection::Explicit(String::from("alias")),
